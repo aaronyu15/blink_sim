@@ -609,10 +609,19 @@ def setup_camera_intrinsic():
 def setup_envmap():
     global config
     hdr_dir = config['hdr_dir']
-    hdr_list = os.listdir(hdr_dir)
-    hdr_name = random.choice(hdr_list)
-    path = f'{hdr_dir}/{hdr_name}'
-    bproc.world.set_world_background_hdr_img(path)
+    hdr_folders = [f for f in os.listdir(hdr_dir) if os.path.isdir(os.path.join(hdr_dir, f))]
+    hdr_folder = random.choice(hdr_folders)
+    # hdr_folder = "autumn_forest_01"  # For testing
+    
+    # Find the actual .hdr file in the folder
+    hdr_folder_path = os.path.join(hdr_dir, hdr_folder)
+    hdr_files = [f for f in os.listdir(hdr_folder_path) if f.endswith('.hdr')]
+    if hdr_files:
+        hdr_file = hdr_files[0]  # Take the first .hdr file
+        path = os.path.join(hdr_folder_path, hdr_file)
+        bproc.world.set_world_background_hdr_img(path)
+    else:
+        print(f"Warning: No .hdr file found in {hdr_folder_path}")
 
 def setup_env(mode):
     cam_pose_list = setup_camera_extrinsic()
@@ -668,11 +677,33 @@ def main():
         'num_keyframes': config['num_keyframes'],
     })
 
+    # Enable GPU rendering if available and configured
+    use_gpu = config.get('use_gpu', True)
+    if use_gpu:
+        # Enable GPU for Cycles (in case it's used elsewhere)
+        bpy.context.scene.cycles.device = 'GPU'
+        bpy.context.preferences.addons['cycles'].preferences.compute_device_type = 'CUDA'
+        bpy.context.preferences.addons['cycles'].preferences.get_devices()
+        for device in bpy.context.preferences.addons['cycles'].preferences.devices:
+            device.use = True
+            print(f"Enabled GPU device: {device.name}")
+        # Note: Eevee automatically uses GPU when available, no additional setup needed
+    
     # exr format which allows linear colorspace
     bproc.renderer.set_output_format("OPEN_EXR", 16)
+    
+    # Use Eevee renderer (faster than Cycles)
     bpy.context.scene.render.engine = 'BLENDER_EEVEE'
     bpy.context.scene.eevee.taa_render_samples = 64
-    bproc.renderer.set_cpu_threads(1)
+    bpy.context.scene.eevee.use_gtao = True  # Ambient occlusion
+    bpy.context.scene.eevee.use_ssr = True   # Screen space reflections
+    
+    # Set Eevee to use GPU
+    if use_gpu:
+        bpy.context.scene.render.use_simplify = False
+        print("GPU rendering enabled for Eevee")
+    else:
+        bproc.renderer.set_cpu_threads(1)
 
     # TODO: Currently we only use slow fps RGB image for ref video, so close motion blur simulation
     bpy.context.scene.render.use_motion_blur = False
@@ -700,7 +731,10 @@ def main():
     bproc.renderer.set_output_format("OPEN_EXR", 16)
     bpy.context.scene.render.engine = 'BLENDER_EEVEE'
     bpy.context.scene.eevee.taa_render_samples = 64
-    bproc.renderer.set_cpu_threads(1)
+    
+    # GPU already enabled in first pass, just skip CPU thread setting if using GPU
+    if not use_gpu:
+        bproc.renderer.set_cpu_threads(1)
 
     # bproc.renderer.enable_motion_blur(motion_blur_length=0.0)
     bpy.context.scene.render.use_motion_blur = False
