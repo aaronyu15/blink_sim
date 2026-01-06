@@ -1,0 +1,39 @@
+image_width: 640
+image_height: 480
+use_gpu: true  # Enable GPU rendering (set to false to use CPU only)
+use_humans: true  # Enable human rendering mode
+save_blend_file: true  # Save .blend file for debugging
+
+# Human model and animation directories
+human_model_dir: 'data/human_models'
+human_anim_dir: 'data/human_animations'
+
+# HDR environment for lighting
+hdr_dir: 'data/haven/hdris/'
+
+# Animation settings
+animation_mode: 'linear'
+duration: 1.0  # Duration in seconds
+event_image_fps: 21  # FPS for event simulation
+rgb_image_fps: 11  # FPS for RGB frames
+num_keyframes: 2
+
+# Sequence range
+seq_range: [0, 1]
+
+# Not used in human mode but required by config parser
+world_length: 50
+world_width: 50
+canopy_height: 30
+canopy_distance: 20
+shape_num: [1, 1]
+activte_range_for_dynamic_obj: [7, 8, 5]
+num_static_obj: [0, 0]
+image_dir: 'data/ADE20K_2021_17_01//'
+shape_dir: 'data/ShapeNetCore.v2/'
+train_split_ratio: 1.0
+texture_split_file: 'configs/ade20k_example.json'
+dynamic_obj_split_file: 'configs/shapenet_example.json'
+min_hsv_range: [1.0, 1.0]
+max_hsv_range: [1.0, 1.0]
+hsv_dark_prob: 0.00

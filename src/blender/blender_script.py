@@ -69,6 +69,122 @@ def euler_from_look_at(position, target, up):
 
     return euler
 
+def load_human_fbx(model_path, animation_path=None):
+    """
+    Load a human FBX model and optionally apply animation.
+    
+    Args:
+        model_path: Path to the human model FBX file
+        animation_path: Optional path to animation FBX file
+    
+    Returns:
+        List of imported mesh objects wrapped in BlenderProc MeshObjects
+    """
+    # Import the human model FBX using Blender's FBX importer
+    # Enable texture search to load texture files from the same directory
+    model_dir = os.path.dirname(model_path)
+    bpy.ops.import_scene.fbx(
+        filepath=model_path,
+        use_image_search=True,  # Search for textures in subdirectories
+        directory=model_dir      # Start search from model directory
+    )
+    
+    # Get the imported objects (they are now selected)
+    imported_objects = list(bpy.context.selected_objects)
+    
+    # Find the armature (root of the rig) - transformations should be applied here
+    armature = None
+    for obj in imported_objects:
+        if obj.type == 'ARMATURE':
+            armature = obj
+            break
+    
+    # Randomize position within camera view
+    # Camera is at [0, 0, 1.5] looking forward
+    # X: random horizontal offset (-1 to 1 meters)
+    # Y: random distance (2.5 to 4 meters from camera)
+    # Z: place feet on/near ground (0.1m), so body extends upward
+    x_offset = random.uniform(-0.8, 0.8)
+    distance = random.uniform(2.5, 4.0)
+    position = [x_offset, distance, 0.1]  # Feet near ground level
+    
+    # Rotation: 90 degrees around X axis to stand upright
+    # Mixamo models are exported lying down, need to rotate them up
+    rotation = [np.pi/2, 0, 0]
+    
+    # Scale: 0.01 to convert from cm (Mixamo units) to meters
+    scale = [0.01, 0.01, 0.01]
+    
+    # Apply transformations to the armature (if it exists) to avoid distortion
+    # This ensures the entire rig transforms correctly
+    if armature:
+        armature.location = position
+        armature.rotation_euler = rotation
+        armature.scale = scale
+    
+    # Wrap mesh objects in BlenderProc MeshObjects
+    mesh_objs = []
+    for obj in imported_objects:
+        if obj.type == 'MESH':
+            bp_obj = bproc.types.MeshObject(obj)
+            mesh_objs.append(bp_obj)
+            
+            # Convert FBX materials to Blender node-based materials
+            # This ensures materials render correctly in Eevee
+            for mat_slot in obj.material_slots:
+                if mat_slot.material:
+                    mat = mat_slot.material
+                    # Ensure material uses nodes
+                    if not mat.use_nodes:
+                        mat.use_nodes = True
+                    
+                    # For Eevee, ensure blend mode is set correctly
+                    mat.blend_method = 'OPAQUE'
+                    mat.shadow_method = 'OPAQUE'
+            
+            # If no armature, apply transforms directly to mesh
+            if not armature:
+                bp_obj.set_location(position)
+                bp_obj.set_rotation_euler(rotation)
+                bp_obj.set_scale(scale)
+    
+    # Load and apply animation if provided
+    if animation_path and os.path.exists(animation_path):
+        # Import animation FBX (this contains the armature with animation data)
+        bpy.ops.import_scene.fbx(filepath=animation_path)
+        anim_objs = bpy.context.selected_objects
+        
+        # Find the armature in the animation file
+        anim_armature = None
+        for obj in anim_objs:
+            if obj.type == 'ARMATURE':
+                anim_armature = obj
+                break
+        
+        # Find the armature in the model file
+        model_armature = None
+        for obj in imported_objects:
+            if obj.type == 'ARMATURE':
+                model_armature = obj
+                break
+        
+        if anim_armature and model_armature:
+            # Copy animation data from animation armature to model armature
+            if anim_armature.animation_data:
+                if not model_armature.animation_data:
+                    model_armature.animation_data_create()
+                
+                # Copy the action (animation)
+                model_armature.animation_data.action = anim_armature.animation_data.action
+                
+                print(f"Animation loaded with {len(anim_armature.animation_data.action.fcurves)} fcurves")
+        
+        # Remove animation objects as we only needed their animation data
+        for obj in anim_objs:
+            bpy.data.objects.remove(obj, do_unlink=True)
+    
+    return mesh_objs
+
 def check_obj_hit(obj, origin, direction, max_distance):
     world2local = np.linalg.inv(obj.get_local2world_mat())
     origin_in_obj = world2local@origin.T
@@ -623,6 +739,97 @@ def setup_envmap():
     else:
         print(f"Warning: No .hdr file found in {hdr_folder_path}")
 
+def setup_human_env(mode):
+    """
+    Setup environment for human animation rendering.
+    Fixed camera, no static objects, only human model with animation.
+    """
+    global config
+    
+    # Setup camera - fixed position looking at the human
+    width, height = config['image_width'], config['image_height']
+    bproc.camera.set_resolution(width, height)
+    
+    # Set camera clipping to avoid near-plane clipping
+    bpy.context.scene.camera.data.clip_start = 0.1
+    bpy.context.scene.camera.data.clip_end = 100.0
+    
+    # Fixed camera position
+    cam_position = [0, 0, 1.5]  # Camera at origin, 1.5m high
+    up = [0, 0, 1]
+    
+    # Setup environment map for lighting
+    setup_envmap()
+    
+    # Load human model and animation
+    human_model_dir = config.get('human_model_dir', 'data/human_models')
+    human_anim_dir = config.get('human_anim_dir', 'data/human_animations')
+    
+    # Get model and animation files
+    model_files = glob.glob(f"{human_model_dir}/*.fbx")
+    anim_files = glob.glob(f"{human_anim_dir}/*.fbx")
+    
+    if not model_files:
+        raise ValueError(f"No FBX models found in {human_model_dir}")
+    
+    # Select model and animation
+    model_path = random.choice(model_files) if len(model_files) > 1 else model_files[0]
+    anim_path = random.choice(anim_files) if anim_files else None
+    
+    print(f"Loading human model: {model_path}")
+    if anim_path:
+        print(f"Loading animation: {anim_path}")
+    
+    # Load the human with animation
+    human_objs = load_human_fbx(model_path, anim_path)
+    
+    # Get the last created human position for camera targeting
+    # Assuming typical Mixamo model is ~180cm tall after 0.01 scale
+    # Camera should look at upper chest area (~1.2m high) to show 80%+ of body
+    if human_objs:
+        # Get the armature position (stored during load_human_fbx)
+        # The human was placed randomly, retrieve those coordinates
+        human_armature = None
+        for obj in bpy.data.objects:
+            if obj.type == 'ARMATURE':
+                human_armature = obj
+                break
+        
+        if human_armature:
+            human_x = human_armature.location[0]
+            human_y = human_armature.location[1] 
+            human_z = human_armature.location[2] + 1.2  # Look at chest height (1.2m above feet)
+            look_at = [human_x, human_y, human_z]
+        else:
+            # Fallback if no armature found
+            look_at = [0, 3, 1.2]
+    else:
+        look_at = [0, 3, 1.2]
+    
+    # Compute camera rotation to look at the human
+    cam_euler = euler_from_look_at(cam_position, look_at, up)
+    # Compute camera rotation to look at the human
+    cam_euler = euler_from_look_at(cam_position, look_at, up)
+    
+    # Create camera poses - duplicate for interpolation compatibility
+    # Fixed camera needs multiple identical poses to satisfy interpolation requirements
+    num_keyframes = config.get('num_keyframes', 2)
+    cam_pose = [[cam_position, cam_euler]] * num_keyframes
+    
+    # Human objects stay in place (skeletal animation handles movement)
+    # But we need to provide poses for each keyframe for the animation system
+    # Each human object gets the same pose repeated for each keyframe
+    human_pose = [[0, 0, 0], [0, 0, 0]]  # Position and rotation (already applied to the object)
+    human_poses = [[human_pose] * num_keyframes for _ in human_objs]
+    
+    setup_info = {
+        'cam_pose': cam_pose,
+        'dynamic_objs': human_objs,
+        'dyna_objs_pose': human_poses,
+    }
+    
+    return setup_info
+
 def setup_env(mode):
     cam_pose_list = setup_camera_extrinsic()
     init_pose = cam_pose_list[0]
@@ -668,7 +875,20 @@ def main():
 
     bproc.init()
 
-    setup_info = setup_env(mode)
+    # Check if we're in human mode
+    use_humans = config.get('use_humans', False)
+    
+    if use_humans:
+        setup_info = setup_human_env(mode)
+    else:
+        setup_info = setup_env(mode)
+
+    # Optionally save .blend file for debugging (before rendering)
+    if config.get('save_blend_file', False):
+        blend_path = os.path.abspath(f'{output_dir}/debug_scene.blend')
+        # Use copy=True to save without changing current file state (prevents material/texture issues)
+        bpy.ops.wm.save_as_mainfile(filepath=blend_path, copy=True)
+        print(f"Saved .blend file to {blend_path}")
 
     ########### first pass, render motion blur ########### 
     animation(output_dir, setup_info, {
@@ -713,6 +933,12 @@ def main():
     blur_img = hdr2ldr(blur_data['colors'], 1)
     data = dict()
     data['blur'] = blur_img
+    
+    # Save RGB frames as PNG files
+    os.makedirs(f'{output_dir}/rgb_slow', exist_ok=True)
+    for i, frame in enumerate(blur_img):
+        cv2.imwrite(f'{output_dir}/rgb_slow/{i:04d}.png', 
+                    cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
     bproc.renderer.set_output_format("PNG")
     data.update(bproc.renderer.render_optical_flow(f'{output_dir}/tmp', f'{output_dir}/tmp', 
@@ -721,7 +947,9 @@ def main():
     bproc.writer.write_hdf5(f'{output_dir}/hdf5/slow', data)
     shutil.rmtree(f'{output_dir}/tmp')
 
-    ########### second pass, render clean image for event simulation ########### 
+    ########### second pass, render clean image for event simulation ###########
+    # rgb_fast: High FPS (event_image_fps) clean frames without motion blur for event camera simulation
+    # rgb_slow: Low FPS (rgb_image_fps) frames with motion blur for RGB reference video 
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
         'num_frame': int(config['event_image_fps'] * config['duration']),
@@ -742,6 +970,13 @@ def main():
     hdr_img = clean_data['colors']
     data = dict()
     data['hdr'] = hdr_img
+    
+    # Save HDR frames converted to LDR as PNG files
+    ldr_img = hdr2ldr(hdr_img, 1)
+    os.makedirs(f'{output_dir}/rgb_fast', exist_ok=True)
+    for i, frame in enumerate(ldr_img):
+        cv2.imwrite(f'{output_dir}/rgb_fast/{i:04d}.png', 
+                    cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
     bproc.writer.write_hdf5(f'{output_dir}/hdf5/fast', data)
     shutil.rmtree(f'{output_dir}/tmp')
