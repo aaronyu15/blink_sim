@@ -19,6 +19,8 @@ def main(config):
     rgb_fps = config['rgb_image_fps']
     event_fps = config['event_image_fps']
     duration = config['duration']
+    rgb_frames = int(round(duration * rgb_fps))
+    event_frames = int(round(duration * event_fps))
     seq_range = config['seq_range']
     train_ratio = config['train_split_ratio']
     size = (config['image_height'], config['image_width'])
@@ -37,9 +39,9 @@ def main(config):
         if not status:
             clean_unfinished(output_dir)
             continue
-        parse_hdf5_to_img_video3(output_dir, 'fast', size, int(duration*event_fps))
-        parse_hdf5_to_flow_dataset(output_dir, int(duration*rgb_fps), config['image_width'], config['image_height'])
-        evt_np = make_events(output_dir, size, int(duration*event_fps), event_fps, True, False, num_bins=15)
+        parse_hdf5_to_img_video3(output_dir, 'event_input', size, event_frames)
+        parse_hdf5_to_flow_dataset(output_dir, rgb_frames, config['image_width'], config['image_height'])
+        evt_np = make_events(output_dir, size, event_frames, event_fps, True, False, num_bins=15)
         clean_tmp_files(output_dir)
 
         print(f'seq#{i} ok')

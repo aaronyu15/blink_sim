@@ -84,7 +84,7 @@ def _make_events_from_esim(nFrames, input_dir, interpTimes):
 
 def make_events(output_dir, size, nFrames, fps=300, save_h5=False, save_event_voxel=False, delta_ms=100, num_bins=15):
     # input_dir = f"{output_dir}/frames"
-    input_dir = f"{output_dir}/hdf5/fast/"
+    input_dir = f"{output_dir}/hdf5/event_input/"
 
     interpTimes = np.linspace(0, nFrames/fps, nFrames, True).tolist()
 

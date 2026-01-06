@@ -60,6 +60,7 @@ def animation(output_dir, setup_info, config):
     num_kf = config['num_keyframes']
 
     bpy.context.scene.frame_start = 0
+    # Use end as an exclusive upper bound for renderers that iterate range(frame_start, frame_end)
     bpy.context.scene.frame_end = num_frames
 
     if mode in ['linear', 'cubinc_spline']:

@@ -28,9 +28,9 @@ def clean_tmp_files(output_dir):
     os.system(f'rm -r {output_dir}/hdf5')
     
 def check_blender_result(output_dir):
-    slow_num = len(os.listdir(f'{output_dir}/hdf5/slow'))
-    fast_num = len(os.listdir(f'{output_dir}/hdf5/fast'))
-    return slow_num > 0 and fast_num > 0
+    rgb_and_flow_num = len(os.listdir(f'{output_dir}/hdf5/rgb_and_flow'))
+    event_input_num = len(os.listdir(f'{output_dir}/hdf5/event_input'))
+    return rgb_and_flow_num > 0 and event_input_num > 0
 
 def clean_unfinished(output_dir):
     print(f'removing {output_dir}')

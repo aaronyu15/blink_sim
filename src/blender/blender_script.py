@@ -19,6 +19,35 @@ from pathlib import Path
 from blenderproc.python.utility.Utility import Utility
 from scipy.spatial.transform import Rotation as R
 import glob
+"""
+BlinkSim Blender Rendering Script
+
+This script renders scenes using Blender for event camera simulation.
+
+OUTPUT FILES STRUCTURE:
+----------------------
+output/{mode}/{seq_id}/
+├── rgb_reference/      # Motion-blurred RGB at rgb_image_fps (e.g., 11 fps)
+│   └── ####.png        # Used for reference video and optical flow computation
+├── rgb_event_input/    # Clean HDR->LDR frames at event_image_fps (e.g., 301 fps)
+│   └── ####.png        # High framerate input for event camera simulation
+├── hdf5/
+│   ├── rgb_and_flow/   # HDF5 containing motion-blurred RGB + optical flow
+│   │   └── #.hdf5      # blur, forward_flow, backward_flow at rgb_image_fps
+│   └── event_input/    # HDF5 files containing clean HDR images
+│       └── #.hdf5      # HDR data at event_image_fps for DVS simulation
+├── dvs_events/         # Event camera data (created by main.py from event_input)
+├── optical_flow/       # Forward optical flow visualization (created by main.py)
+├── hdr.mp4             # Video compiled from HDR frames (created by main.py)
+└── debug_scene.blend   # Optional: Blender scene file (if save_blend_file: true)
+
+RENDERING PIPELINE:
+------------------
+1. First pass: Render motion-blurred frames at rgb_image_fps with optical flow
+2. Second pass: Render clean frames at event_image_fps for event simulation
+3. Post-processing: Convert HDR to events using DVS simulation
+"""
+
 
 config = None
 
@@ -122,6 +151,46 @@ def load_human_fbx(model_path, animation_path=None):
         armature.rotation_euler = rotation
         armature.scale = scale
     
+    # Load and apply animation if provided
+    animation_action = None
+    if animation_path and os.path.exists(animation_path):
+        # Import animation FBX (this contains the armature with animation data)
+        bpy.ops.import_scene.fbx(filepath=animation_path)
+        anim_objs = bpy.context.selected_objects
+        
+        # Find the armature in the animation file
+        anim_armature = None
+        for obj in anim_objs:
+            if obj.type == 'ARMATURE':
+                anim_armature = obj
+                break
+        
+        if anim_armature and armature:
+            # Copy animation data from animation armature to model armature
+            if anim_armature.animation_data and anim_armature.animation_data.action:
+                if not armature.animation_data:
+                    armature.animation_data_create()
+                
+                # Copy the action (animation)
+                animation_action = anim_armature.animation_data.action
+                armature.animation_data.action = animation_action
+                
+                print(f"Animation loaded with {len(animation_action.fcurves)} fcurves")
+                
+                # Get animation frame range
+                anim_start = int(animation_action.frame_range[0])
+                anim_end = int(animation_action.frame_range[1])
+                anim_length = anim_end - anim_start
+                
+                # Store animation range for later retiming
+                armature["anim_start"] = anim_start
+                armature["anim_end"] = anim_end
+                armature["anim_length"] = anim_length
+        
+        # Remove animation objects as we only needed their animation data
+        for obj in anim_objs:
+            bpy.data.objects.remove(obj, do_unlink=True)
+    
     # Wrap mesh objects in BlenderProc MeshObjects
     mesh_objs = []
     for obj in imported_objects:
@@ -148,42 +217,21 @@ def load_human_fbx(model_path, animation_path=None):
                 bp_obj.set_rotation_euler(rotation)
                 bp_obj.set_scale(scale)
     
-    # Load and apply animation if provided
-    if animation_path and os.path.exists(animation_path):
-        # Import animation FBX (this contains the armature with animation data)
-        bpy.ops.import_scene.fbx(filepath=animation_path)
-        anim_objs = bpy.context.selected_objects
-        
-        # Find the armature in the animation file
-        anim_armature = None
-        for obj in anim_objs:
-            if obj.type == 'ARMATURE':
-                anim_armature = obj
-                break
-        
-        # Find the armature in the model file
-        model_armature = None
-        for obj in imported_objects:
-            if obj.type == 'ARMATURE':
-                model_armature = obj
-                break
-        
-        if anim_armature and model_armature:
-            # Copy animation data from animation armature to model armature
-            if anim_armature.animation_data:
-                if not model_armature.animation_data:
-                    model_armature.animation_data_create()
-                
-                # Copy the action (animation)
-                model_armature.animation_data.action = anim_armature.animation_data.action
-                
-                print(f"Animation loaded with {len(anim_armature.animation_data.action.fcurves)} fcurves")
-        
-        # Remove animation objects as we only needed their animation data
-        for obj in anim_objs:
-            bpy.data.objects.remove(obj, do_unlink=True)
-    
     return mesh_objs
+
+
+def apply_time_stretch_from_base(base_frames: int, target_frames: int):
+    """Map a higher-FPS render onto the same motion covered by a lower-FPS base.
+    base_frames: frame count of the reference clip (e.g., RGB).
+    target_frames: frame count of the stretched clip (e.g., events).
+    """
+    base = max(1, int(base_frames))
+    target = max(1, int(target_frames))
+    bpy.context.scene.render.frame_map_old = base
+    bpy.context.scene.render.frame_map_new = target
+    bpy.context.scene.frame_start = 0
+    # Use end as exclusive upper bound to produce exactly `target` frames when iterating range(frame_start, frame_end)
+    bpy.context.scene.frame_end = target
 
 def check_obj_hit(obj, origin, direction, max_distance):
     world2local = np.linalg.inv(obj.get_local2world_mat())
@@ -891,11 +939,19 @@ def main():
         print(f"Saved .blend file to {blend_path}")
 
     ########### first pass, render motion blur ########### 
+    rgb_fps = config['rgb_image_fps']
+    rgb_frames = int(round(rgb_fps * config['duration']))  # exact count
+    bpy.context.scene.render.fps = rgb_fps
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
-        'num_frame': int(config['rgb_image_fps'] * config['duration']),
+        'num_frame': rgb_frames,
         'num_keyframes': config['num_keyframes'],
     })
+    bpy.context.scene.render.frame_map_old = 1
+    bpy.context.scene.render.frame_map_new = 1
+    bpy.context.scene.frame_start = 0
+    # Exclusive end so we render exactly rgb_frames frames if renderer iterates range(frame_start, frame_end)
+    bpy.context.scene.frame_end = rgb_frames
 
     # Enable GPU rendering if available and configured
     use_gpu = config.get('use_gpu', True)
@@ -934,27 +990,31 @@ def main():
     data = dict()
     data['blur'] = blur_img
     
-    # Save RGB frames as PNG files
-    os.makedirs(f'{output_dir}/rgb_slow', exist_ok=True)
+    # Save RGB frames as PNG files (motion-blurred, low fps, for reference video)
+    os.makedirs(f'{output_dir}/rgb_reference', exist_ok=True)
     for i, frame in enumerate(blur_img):
-        cv2.imwrite(f'{output_dir}/rgb_slow/{i:04d}.png', 
+        cv2.imwrite(f'{output_dir}/rgb_reference/{i:04d}.png', 
                     cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
     bproc.renderer.set_output_format("PNG")
     data.update(bproc.renderer.render_optical_flow(f'{output_dir}/tmp', f'{output_dir}/tmp', 
         get_backward_flow=True, get_forward_flow=True, blender_image_coordinate_style=False))
 
-    bproc.writer.write_hdf5(f'{output_dir}/hdf5/slow', data)
+    bproc.writer.write_hdf5(f'{output_dir}/hdf5/rgb_and_flow', data)
     shutil.rmtree(f'{output_dir}/tmp')
 
     ########### second pass, render clean image for event simulation ###########
-    # rgb_fast: High FPS (event_image_fps) clean frames without motion blur for event camera simulation
-    # rgb_slow: Low FPS (rgb_image_fps) frames with motion blur for RGB reference video 
+    # rgb_reference: Low FPS (rgb_image_fps) motion-blurred frames for reference video & optical flow
+    # rgb_event_input: High FPS (event_image_fps) clean HDR frames for event camera simulation 
+    event_fps = config['event_image_fps']
+    event_frames = int(round(event_fps * config['duration']))  # exact count
+    bpy.context.scene.render.fps = event_fps
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
-        'num_frame': int(config['event_image_fps'] * config['duration']),
+        'num_frame': event_frames,
         'num_keyframes': config['num_keyframes'],
     })
+    apply_time_stretch_from_base(rgb_frames, event_frames)
 
     bproc.renderer.set_output_format("OPEN_EXR", 16)
     bpy.context.scene.render.engine = 'BLENDER_EEVEE'
@@ -971,14 +1031,14 @@ def main():
     data = dict()
     data['hdr'] = hdr_img
     
-    # Save HDR frames converted to LDR as PNG files
+    # Save HDR frames converted to LDR as PNG files (clean, high fps, for event simulation)
     ldr_img = hdr2ldr(hdr_img, 1)
-    os.makedirs(f'{output_dir}/rgb_fast', exist_ok=True)
+    os.makedirs(f'{output_dir}/rgb_event_input', exist_ok=True)
     for i, frame in enumerate(ldr_img):
-        cv2.imwrite(f'{output_dir}/rgb_fast/{i:04d}.png', 
+        cv2.imwrite(f'{output_dir}/rgb_event_input/{i:04d}.png', 
                     cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
-    bproc.writer.write_hdf5(f'{output_dir}/hdf5/fast', data)
+    bproc.writer.write_hdf5(f'{output_dir}/hdf5/event_input', data)
     shutil.rmtree(f'{output_dir}/tmp')
 
 

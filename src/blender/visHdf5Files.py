@@ -295,14 +295,14 @@ def flow_consistency(forward, backward):
 
 
 def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height):
-    num = len(glob.glob(f"{output_dir}/hdf5/slow/*.hdf5"))
+    num = len(glob.glob(f"{output_dir}/hdf5/rgb_and_flow/*.hdf5"))
     assert nFrames <= num
     # os.system(f'mkdir -p {output_dir}/left_final')
     os.system(f'mkdir -p {output_dir}/hdr')
     os.system(f'mkdir -p {output_dir}/forward_flow')
 
     for i in range(nFrames):
-        hdf5_path = f"{output_dir}/hdf5/slow/{i}.hdf5"
+        hdf5_path = f"{output_dir}/hdf5/rgb_and_flow/{i}.hdf5"
         data = h5py.File(hdf5_path, 'r')
         forward = data['forward_flow'][:] # (h, w, 2)
 
@@ -312,7 +312,7 @@ def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height):
         # cv2.imwrite(f'{output_dir}/left_final/{i:06d}.png', blur)
 
         if i != nFrames-1:
-            hdf5_path_next = f"{output_dir}/hdf5/slow/{i+1}.hdf5"
+            hdf5_path_next = f"{output_dir}/hdf5/rgb_and_flow/{i+1}.hdf5"
             data_next = h5py.File(hdf5_path_next, 'r')
             backward = data_next['backward_flow'][:] # (h, w, 2)
             valid = flow_consistency(forward, backward)

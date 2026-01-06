@@ -1,5 +1,5 @@
-image_width: 640
-image_height: 480
+image_width: 320
+image_height: 320
 use_gpu: true  # Enable GPU rendering (set to false to use CPU only)
 use_humans: true  # Enable human rendering mode
 save_blend_file: true  # Save .blend file for debugging
@@ -14,7 +14,7 @@ hdr_dir: 'data/haven/hdris/'
 # Animation settings
 animation_mode: 'linear'
 duration: 1.0  # Duration in seconds
-event_image_fps: 21  # FPS for event simulation
+event_image_fps: 201  # FPS for event simulation
 rgb_image_fps: 11  # FPS for RGB frames
 num_keyframes: 2
 
