@@ -2,7 +2,11 @@ image_width: 320
 image_height: 320
 use_gpu: true  # Enable GPU rendering (set to false to use CPU only)
 use_humans: true  # Enable human rendering mode
-save_blend_file: true  # Save .blend file for debugging
+save_blend_file: false  # Save .blend file for debugging
+save_hdr: false
+save_hdr_mp4: false
+save_rgb_reference: true
+save_rgb_event_input: true
 
 # Human model and animation directories
 human_model_dir: 'data/human_models'
@@ -11,15 +15,31 @@ human_anim_dir: 'data/human_animations'
 # HDR environment for lighting
 hdr_dir: 'data/haven/hdris/'
 
+
+human_x_offset: [-0.8, 0.8]  # Horizontal offset range for human placement
+human_distance: [0.5, 4.0]  # Distance range from camera for human placement
+human_z_offset: [-0.3, 0.0]  # Vertical offset range for human placement
 # Animation settings
 animation_mode: 'linear'
-duration: 1.0  # Duration in seconds
-event_image_fps: 201  # FPS for event simulation
-rgb_image_fps: 11  # FPS for RGB frames
+duration: 2.0  # Duration in seconds (fallback when not using animation length)
+duration_from_animation: true  # When true, override duration using FBX animation length and rgb_image_fps
+event_image_fps: 60  # FPS for event simulation
+rgb_image_fps: 30  # FPS for RGB frames
 num_keyframes: 2
+loop_actions: true
+locomotion_keywords: ['run','walk','jog','sprint']
+locomotion_yaw_choices: [0.0, -1.5708, 1.5708]
+locomotion_start_offset: 4.0
+loop_locomotion: false
+use_fill_light: true
+fill_light_energy: [0, 100]
+fill_light_distance: 1.0
+fill_light_height: 0.75
+fill_light_size: 1.0
 
 # Sequence range
 seq_range: [0, 1]
+train_split_ratio: 0.8
 
 # Not used in human mode but required by config parser
 world_length: 50
@@ -31,7 +51,6 @@ activte_range_for_dynamic_obj: [7, 8, 5]
 num_static_obj: [0, 0]
 image_dir: 'data/ADE20K_2021_17_01//'
 shape_dir: 'data/ShapeNetCore.v2/'
-train_split_ratio: 1.0
 texture_split_file: 'configs/ade20k_example.json'
 dynamic_obj_split_file: 'configs/shapenet_example.json'
 min_hsv_range: [1.0, 1.0]

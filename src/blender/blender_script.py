@@ -7,6 +7,7 @@ os.environ["NUMEXPR_MAX_THREADS"]="1"
 from skspatial.objects import Line, Sphere
 import argparse, bpy, math, pickle, cv2, os, sys, shutil
 import numpy as np
+from mathutils import Vector
 from blenderproc.python.material.MaterialLoaderUtility import convert_to_materials
 sys.path.insert(0, os.path.abspath(__file__+'/../../..'))
 from src.blender.movement import animation
@@ -98,6 +99,16 @@ def euler_from_look_at(position, target, up):
 
     return euler
 
+def make_action_cyclic(action):
+    """Add cyclic modifiers so an action loops for the full render duration."""
+    if action is None:
+        return
+    for fcu in action.fcurves:
+        mod = fcu.modifiers.new(type='CYCLES')
+        mod.mode_before = 'REPEAT'
+        mod.mode_after = 'REPEAT'
+
+
 def load_human_fbx(model_path, animation_path=None):
     """
     Load a human FBX model and optionally apply animation.
@@ -133,9 +144,10 @@ def load_human_fbx(model_path, animation_path=None):
     # X: random horizontal offset (-1 to 1 meters)
     # Y: random distance (2.5 to 4 meters from camera)
     # Z: place feet on/near ground (0.1m), so body extends upward
-    x_offset = random.uniform(-0.8, 0.8)
-    distance = random.uniform(2.5, 4.0)
-    position = [x_offset, distance, 0.1]  # Feet near ground level
+    x_offset = random.uniform(config['human_x_offset'][0], config['human_x_offset'][1])
+    distance = random.uniform(config['human_distance'][0], config['human_distance'][1])
+    z_offset = random.uniform(config['human_z_offset'][0], config['human_z_offset'][1])
+    position = [x_offset, distance, z_offset]  # Feet near ground level
     
     # Rotation: 90 degrees around X axis to stand upright
     # Mixamo models are exported lying down, need to rotate them up
@@ -153,7 +165,11 @@ def load_human_fbx(model_path, animation_path=None):
     
     # Load and apply animation if provided
     animation_action = None
+    locomotion = False
     if animation_path and os.path.exists(animation_path):
+        locomotion_keywords = config.get('locomotion_keywords', ['run', 'walk', 'jog', 'sprint'])
+        fname = os.path.basename(animation_path).lower()
+        locomotion = any(k in fname for k in locomotion_keywords)
         # Import animation FBX (this contains the armature with animation data)
         bpy.ops.import_scene.fbx(filepath=animation_path)
         anim_objs = bpy.context.selected_objects
@@ -174,6 +190,13 @@ def load_human_fbx(model_path, animation_path=None):
                 # Copy the action (animation)
                 animation_action = anim_armature.animation_data.action
                 armature.animation_data.action = animation_action
+                anim_start = float(animation_action.frame_range[0])
+                anim_end = float(animation_action.frame_range[1])
+                config['anim_frame_start'] = anim_start
+                config['anim_frame_length'] = anim_end - anim_start
+                loop_loco = config.get('loop_locomotion', False)
+                if config.get('loop_actions', True) and (not locomotion or loop_loco):
+                    make_action_cyclic(animation_action)
                 
                 print(f"Animation loaded with {len(animation_action.fcurves)} fcurves")
                 
@@ -191,6 +214,18 @@ def load_human_fbx(model_path, animation_path=None):
         for obj in anim_objs:
             bpy.data.objects.remove(obj, do_unlink=True)
     
+    # Adjust facing and start position for locomotion animations so actors move across the camera view
+    if animation_path and locomotion:
+        yaw_choices = config.get('locomotion_yaw_choices', [0.0, -np.pi/2, np.pi/2])
+        yaw_offset = random.choice(yaw_choices)
+        if armature:
+            armature.rotation_euler[2] += yaw_offset
+            # Move start position backward along heading so the actor enters the frame
+            start_offset = config.get('locomotion_start_offset', 4.0)
+            yaw = armature.rotation_euler[2]
+            forward = np.array([np.sin(yaw), np.cos(yaw), 0.0], dtype=float)
+            armature.location = armature.location - Vector((forward * start_offset).tolist())
+
     # Wrap mesh objects in BlenderProc MeshObjects
     mesh_objs = []
     for obj in imported_objects:
@@ -466,6 +501,40 @@ def setup_lighting(init_pose):
     light3.set_location(pos+pos_offset)
     light3.set_rotation_euler(euler_from_look_at(pos+pos_offset, pos+target_offset, up))
     light3.set_energy(3e4)
+
+
+def setup_fill_light(cam_position, look_at):
+    """Add an area light near the camera to lift shadows on the subject."""
+    global config
+    if not config.get('use_fill_light', True):
+        return
+    energy = config.get('fill_light_energy', 100)
+    energy = random.uniform(energy[0], energy[1]) if isinstance(energy, list) else energy
+    distance = config.get('fill_light_distance', 2.5)
+    height = config.get('fill_light_height', 1.5)
+    size = config.get('fill_light_size', 2.0)
+    up = np.array([0, 0, 1])
+
+    cam_position = np.array(cam_position, dtype=float)
+    look_at = np.array(look_at, dtype=float)
+    dir_flat = look_at - cam_position
+    dir_flat[2] = 0.0
+    norm = np.linalg.norm(dir_flat)
+    if norm < 1e-6:
+        dir_flat = np.array([0, 1, 0], dtype=float)
+    else:
+        dir_flat /= norm
+
+    pos = cam_position + dir_flat * distance + np.array([0, 0, height])
+    light = bproc.types.Light()
+    light.set_type("AREA")
+    light.set_location(pos)
+    light.set_rotation_euler(euler_from_look_at(pos, look_at, up))
+    try:
+        light.set_size(size)
+    except Exception:
+        pass
+    light.set_energy(energy)
 
 
 def normalized(a):
@@ -830,6 +899,16 @@ def setup_human_env(mode):
     
     # Load the human with animation
     human_objs = load_human_fbx(model_path, anim_path)
+
+    # Optionally drive duration from the animation length (frames / rgb fps)
+    if config.get('duration_from_animation', False):
+        if 'anim_frame_length' in config:
+            anim_len_frames = config['anim_frame_length']
+            fps = config.get('rgb_image_fps', 10)
+            config['duration'] = float(anim_len_frames) / float(fps)
+            print(f"Using animation-based duration: {anim_len_frames} frames @ {fps} fps -> {config['duration']:.3f}s")
+        else:
+            print("duration_from_animation requested but no animation frame length found; falling back to config duration")
     
     # Get the last created human position for camera targeting
     # Assuming typical Mixamo model is ~180cm tall after 0.01 scale
@@ -864,6 +943,9 @@ def setup_human_env(mode):
     num_keyframes = config.get('num_keyframes', 2)
     cam_pose = [[cam_position, cam_euler]] * num_keyframes
     
+    # Add camera-based fill to brighten foreground near the camera
+    setup_fill_light(cam_position, look_at)
+
     # Human objects stay in place (skeletal animation handles movement)
     # But we need to provide poses for each keyframe for the animation system
     # Each human object gets the same pose repeated for each keyframe
@@ -885,6 +967,9 @@ def setup_env(mode):
     setup_material(ground, static_objs, canopys, mode)
     # setup_lighting(cam_pose_list[0])
     setup_envmap()
+    # Camera-based fill to brighten foreground near the camera
+    pos, lookat = init_pose
+    setup_fill_light(pos, lookat)
     setup_camera_intrinsic()
     pos_lookat_list = [[pos, lookat] for (pos, lookat, euler) in cam_pose_list]
     pos_euler_list = [[pos, euler] for (pos, lookat, euler) in cam_pose_list]
@@ -991,10 +1076,11 @@ def main():
     data['blur'] = blur_img
     
     # Save RGB frames as PNG files (motion-blurred, low fps, for reference video)
-    os.makedirs(f'{output_dir}/rgb_reference', exist_ok=True)
-    for i, frame in enumerate(blur_img):
-        cv2.imwrite(f'{output_dir}/rgb_reference/{i:04d}.png', 
-                    cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+    if config.get('save_rgb_reference', True):
+        os.makedirs(f'{output_dir}/rgb_reference', exist_ok=True)
+        for i, frame in enumerate(blur_img):
+            cv2.imwrite(f'{output_dir}/rgb_reference/{i:04d}.png', 
+                        cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
     bproc.renderer.set_output_format("PNG")
     data.update(bproc.renderer.render_optical_flow(f'{output_dir}/tmp', f'{output_dir}/tmp', 
@@ -1033,10 +1119,11 @@ def main():
     
     # Save HDR frames converted to LDR as PNG files (clean, high fps, for event simulation)
     ldr_img = hdr2ldr(hdr_img, 1)
-    os.makedirs(f'{output_dir}/rgb_event_input', exist_ok=True)
-    for i, frame in enumerate(ldr_img):
-        cv2.imwrite(f'{output_dir}/rgb_event_input/{i:04d}.png', 
-                    cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+    if config.get('save_rgb_event_input', True):
+        os.makedirs(f'{output_dir}/rgb_event_input', exist_ok=True)
+        for i, frame in enumerate(ldr_img):
+            cv2.imwrite(f'{output_dir}/rgb_event_input/{i:04d}.png', 
+                        cv2.cvtColor((frame * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
     bproc.writer.write_hdf5(f'{output_dir}/hdf5/event_input', data)
     shutil.rmtree(f'{output_dir}/tmp')

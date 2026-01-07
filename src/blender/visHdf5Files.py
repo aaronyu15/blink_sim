@@ -229,7 +229,9 @@ def vis_file(path, keys_to_visualize=None, rgb_keys=None, hdr_keys=None,
         print("The file does not exist: {}".format(path))
 
 
-def parse_hdf5_to_img_video3(output_dir, mode, size, num_frame):
+def parse_hdf5_to_img_video3(output_dir, mode, size, num_frame, save_hdr_mp4=True):
+    if not save_hdr_mp4:
+        return
     hdf5_paths = sorted(glob.glob(f"{output_dir}/hdf5/{mode}/*.hdf5"))
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     video = cv2.VideoWriter(f'{output_dir}/hdr.mp4', fourcc, 10, (size[1], size[0]))
@@ -294,11 +296,12 @@ def flow_consistency(forward, backward):
     return valid
 
 
-def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height):
+def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True):
     num = len(glob.glob(f"{output_dir}/hdf5/rgb_and_flow/*.hdf5"))
     assert nFrames <= num
     # os.system(f'mkdir -p {output_dir}/left_final')
-    os.system(f'mkdir -p {output_dir}/hdr')
+    if save_hdr:
+        os.system(f'mkdir -p {output_dir}/hdr')
     os.system(f'mkdir -p {output_dir}/forward_flow')
 
     for i in range(nFrames):
@@ -306,8 +309,9 @@ def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height):
         data = h5py.File(hdf5_path, 'r')
         forward = data['forward_flow'][:] # (h, w, 2)
 
-        hdr = data['blur'][:]
-        np.save(f'{output_dir}/hdr/{i:06d}.npy', hdr)
+        if save_hdr:
+            hdr = data['blur'][:]
+            np.save(f'{output_dir}/hdr/{i:06d}.npy', hdr)
         # blur = data['blur'][:] * 255
         # cv2.imwrite(f'{output_dir}/left_final/{i:06d}.png', blur)
 
