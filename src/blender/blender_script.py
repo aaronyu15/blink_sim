@@ -194,8 +194,14 @@ def load_human_fbx(model_path, animation_path=None):
                 anim_end = float(animation_action.frame_range[1])
                 config['anim_frame_start'] = anim_start
                 config['anim_frame_length'] = anim_end - anim_start
+
+                # Only loop the action if the requested duration exceeds the native animation length
                 loop_loco = config.get('loop_locomotion', False)
-                if config.get('loop_actions', True) and (not locomotion or loop_loco):
+                should_loop = config.get('loop_actions', True)
+                anim_len_sec = (anim_end - anim_start) / float(config.get('rgb_image_fps', 10))
+                desired_dur = config.get('duration', anim_len_sec)
+                need_loop = desired_dur > anim_len_sec + 1e-6
+                if should_loop and need_loop and (not locomotion or loop_loco):
                     make_action_cyclic(animation_action)
                 
                 print(f"Animation loaded with {len(animation_action.fcurves)} fcurves")
@@ -883,15 +889,25 @@ def setup_human_env(mode):
     human_anim_dir = config.get('human_anim_dir', 'data/human_animations')
     
     # Get model and animation files
-    model_files = glob.glob(f"{human_model_dir}/*.fbx")
-    anim_files = glob.glob(f"{human_anim_dir}/*.fbx")
+    model_files = sorted(glob.glob(f"{human_model_dir}/*.fbx"))
+    anim_files = sorted(glob.glob(f"{human_anim_dir}/*.fbx"))
     
     if not model_files:
         raise ValueError(f"No FBX models found in {human_model_dir}")
     
-    # Select model and animation
-    model_path = random.choice(model_files) if len(model_files) > 1 else model_files[0]
-    anim_path = random.choice(anim_files) if anim_files else None
+    forced_model = config.get('forced_model_path')
+    forced_anim = config.get('forced_animation_path')
+
+    # Enforce deterministic selection from per-job config; no cycling/random fallback
+    if forced_model:
+        model_path = forced_model
+    else:
+        model_path = model_files[0]
+
+    if forced_anim:
+        anim_path = forced_anim
+    else:
+        anim_path = anim_files[0] if anim_files else None
     
     print(f"Loading human model: {model_path}")
     if anim_path:
@@ -900,13 +916,17 @@ def setup_human_env(mode):
     # Load the human with animation
     human_objs = load_human_fbx(model_path, anim_path)
 
-    # Optionally drive duration from the animation length (frames / rgb fps)
+    # Optionally consider animation length; clamp duration to min(config duration, animation length)
     if config.get('duration_from_animation', False):
         if 'anim_frame_length' in config:
             anim_len_frames = config['anim_frame_length']
             fps = config.get('rgb_image_fps', 10)
-            config['duration'] = float(anim_len_frames) / float(fps)
-            print(f"Using animation-based duration: {anim_len_frames} frames @ {fps} fps -> {config['duration']:.3f}s")
+            anim_sec = float(anim_len_frames) / float(fps)
+            cfg_dur = config.get('duration', anim_sec)
+            new_dur = min(cfg_dur, anim_sec)
+            if abs(new_dur - cfg_dur) > 1e-6:
+                print(f"Clamping duration to animation length: anim {anim_sec:.3f}s < cfg {cfg_dur:.3f}s -> {new_dur:.3f}s")
+            config['duration'] = new_dur
         else:
             print("duration_from_animation requested but no animation frame length found; falling back to config duration")
     
@@ -1005,6 +1025,9 @@ def main():
             config['activte_range_for_dynamic_obj'] = np.array(config['activte_range_for_dynamic_obj'] )
         except yaml.YAMLError as exc:
             print(exc)
+
+    # Keep output_dir in config so downstream logic can map sequences to model/animation pairs
+    config['output_dir'] = output_dir
 
     bproc.init()
 
