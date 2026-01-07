@@ -82,7 +82,31 @@ def _make_events_from_esim(nFrames, input_dir, interpTimes):
 
 
 
-def make_events(output_dir, size, nFrames, fps=300, save_h5=False, save_event_voxel=False, delta_ms=100, num_bins=15):
+def _inject_noise(events_np, size, nFrames, fps, noise_enabled=False, noise_rate=0.02):
+    if not noise_enabled or noise_rate <= 0:
+        return events_np
+
+    h, w = size
+    duration = nFrames / float(fps)
+    base_count = events_np.shape[0]
+    # Fallback if no events: approximate count from duration*fps (one event per frame)
+    approx_count = base_count if base_count > 0 else nFrames
+    noise_n = max(1, int(approx_count * noise_rate))
+
+    t_noise = np.random.uniform(0.0, duration, size=noise_n)
+    x_noise = np.random.randint(0, w, size=noise_n)
+    y_noise = np.random.randint(0, h, size=noise_n)
+    p_noise = np.random.randint(0, 2, size=noise_n)
+
+    noise_events = np.stack([t_noise, y_noise, x_noise, p_noise], axis=1)
+    combined = np.concatenate([events_np, noise_events], axis=0) if base_count > 0 else noise_events
+    # Sort by timestamp to keep temporal order
+    combined = combined[combined[:, 0].argsort()]
+    return combined
+
+
+def make_events(output_dir, size, nFrames, fps=300, save_h5=False, save_event_voxel=False, delta_ms=100, num_bins=15,
+                noise_enabled=False, noise_rate=0.02):
     # input_dir = f"{output_dir}/frames"
     input_dir = f"{output_dir}/hdf5/event_input/"
 
@@ -90,6 +114,7 @@ def make_events(output_dir, size, nFrames, fps=300, save_h5=False, save_event_vo
 
     print(f'*** Stage 3/3: emulating DVS events from {nFrames} frames')
     events_np = _make_events_from_voltmeter(nFrames, input_dir, interpTimes)
+    events_np = _inject_noise(events_np, size, nFrames, fps, noise_enabled=noise_enabled, noise_rate=noise_rate)
     # events_np = _make_events_from_v2e(nFrames, input_dir, interpTimes)
     # events_np = _make_events_from_esim(nFrames, input_dir, interpTimes)
     # import ipdb; ipdb.set_trace()

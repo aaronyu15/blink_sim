@@ -8,12 +8,14 @@ save_hdr: false
 save_hdr_mp4: false
 save_rgb_reference: true
 save_rgb_event_input: true
+event_noise_enabled: true  # Inject spurious DVS-like background events
+event_noise_rate: 0.02      # Fraction of normal event count to add as noise (e.g., 0.01–0.05)
 
 # Human model and animation directories
 human_model_dir: 'data/human_models'
 human_anim_dir: 'data/human_animations'
 active_human_models: ['girl1']  # Optional list of model basenames to include; empty means all
-active_human_anims: ['FemaleWalk', 'Clapping']    # Optional list of animation basenames to include; empty means all
+active_human_anims: ['JumpingJacks']    # Optional list of animation basenames to include; empty means all
 clips_per_character: 1    # 0 means default to seq_range length; otherwise controls clips per active model. This is the number of duplicates to render
 
 # HDR environment for lighting

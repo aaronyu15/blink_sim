@@ -133,7 +133,17 @@ def main(config):
             config['image_height'],
             save_hdr=config.get('save_hdr', False)
         )
-        evt_np = make_events(output_dir, size, event_frames, event_fps, True, False, num_bins=15)
+        evt_np = make_events(
+            output_dir,
+            size,
+            event_frames,
+            event_fps,
+            True,
+            False,
+            num_bins=15,
+            noise_enabled=config.get('event_noise_enabled', False),
+            noise_rate=config.get('event_noise_rate', 0.02),
+        )
         clean_tmp_files(output_dir)
 
         print(f'seq#{idx} ok')
