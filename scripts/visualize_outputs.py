@@ -63,6 +63,7 @@ def main():
     parser.add_argument('--event_window_ms', type=float, default=None, help='Optional event slice window (ms). If set, increases/decreases event time resolution independent of frame counts.')
     parser.add_argument('--auto_play', action='store_true', help='Enable automatic animation instead of manual slider')
     parser.add_argument('--flow_eps', type=float, default=1e-4, help='Zero-out flow vectors with magnitude below this threshold to avoid noisy first-frame artifacts')
+    parser.add_argument('--plot_flow_stats', action='store_true', help='Plot flow magnitude statistics across all frames in a single plot')
     args = parser.parse_args()
 
     out = Path(args.output_dir)
@@ -75,6 +76,61 @@ def main():
     rgb_files = load_pngs(rgb_dir)
     event_files = load_pngs(event_dir)
     flow_files = load_npys(flow_dir)
+    
+    # If user wants flow statistics plot, compute and display
+    if args.plot_flow_stats:
+        if len(flow_files) == 0:
+            raise RuntimeError('No forward_flow files found')
+        
+        print(f"Computing flow magnitude statistics for {len(flow_files)} frames...")
+        mean_mags = []
+        max_mags = []
+        median_mags = []
+        p95_mags = []
+        
+        for flow_file in flow_files:
+            flow_arr = np.load(flow_file)
+            flow_arr = np.nan_to_num(flow_arr, copy=False)
+            
+            if flow_arr.ndim == 3 and flow_arr.shape[2] >= 2:
+                flow_vec = flow_arr[:, :, :2]
+                mag = np.linalg.norm(flow_vec, axis=2)
+                mag = mag[mag >= args.flow_eps]  # Filter out noise
+                
+                if mag.size > 0:
+                    mean_mags.append(np.mean(mag))
+                    max_mags.append(np.max(mag))
+                    median_mags.append(np.median(mag))
+                    p95_mags.append(np.percentile(mag, 95))
+                else:
+                    mean_mags.append(0)
+                    max_mags.append(0)
+                    median_mags.append(0)
+                    p95_mags.append(0)
+            else:
+                mean_mags.append(0)
+                max_mags.append(0)
+                median_mags.append(0)
+                p95_mags.append(0)
+        
+        frames = np.arange(len(flow_files))
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(frames, mean_mags, label='Mean magnitude', linewidth=2)
+        ax.plot(frames, median_mags, label='Median magnitude', linewidth=2)
+        ax.plot(frames, p95_mags, label='95th percentile', linewidth=2, linestyle='--')
+        ax.plot(frames, max_mags, label='Max magnitude', linewidth=1, alpha=0.5)
+        
+        ax.set_xlabel('Frame', fontsize=12)
+        ax.set_ylabel('Flow Magnitude (pixels)', fontsize=12)
+        ax.set_title(f'Optical Flow Magnitude Statistics - {Path(args.output_dir).name}', fontsize=14)
+        ax.legend(loc='best')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        return
+    
     ts, ex, ey, ep = load_events(events_h5)
 
     have_flow = len(flow_files) > 0
