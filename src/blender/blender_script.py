@@ -195,15 +195,6 @@ def load_human_fbx(model_path, animation_path=None):
                 config['anim_frame_start'] = anim_start
                 config['anim_frame_length'] = anim_end - anim_start
 
-                # Only loop the action if the requested duration exceeds the native animation length
-                loop_loco = config.get('loop_locomotion', False)
-                should_loop = config.get('loop_actions', True)
-                anim_len_sec = (anim_end - anim_start) / float(config.get('rgb_image_fps', 10))
-                desired_dur = config.get('duration', anim_len_sec)
-                need_loop = desired_dur > anim_len_sec + 1e-6
-                if should_loop and need_loop and (not locomotion or loop_loco):
-                    make_action_cyclic(animation_action)
-                
                 print(f"Animation loaded with {len(animation_action.fcurves)} fcurves")
                 
                 # Get animation frame range
@@ -1145,6 +1136,15 @@ def main():
     apply_time_stretch_from_base(rgb_frames, event_frames)
 
     bproc.renderer.set_output_format("OPEN_EXR", 16)
+    if config.get('use_cycles', False):
+        bpy.context.scene.render.engine = 'CYCLES'
+    else:
+        bpy.context.scene.render.engine = 'BLENDER_EEVEE'
+        bpy.context.scene.eevee.taa_render_samples = 64
+    
+    # GPU already enabled in first pass, just skip CPU thread setting if using GPU
+    if not use_gpu:
+        bproc.renderer.set_cpu_threads(8)
 
     # bproc.renderer.enable_motion_blur(motion_blur_length=0.0)
     bpy.context.scene.render.use_motion_blur = False

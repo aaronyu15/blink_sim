@@ -81,8 +81,8 @@ def main(config):
     train_cut = int(num_seq * train_ratio)
 
     for idx, job in enumerate(jobs):
-        np.random.seed(idx)
-        random.seed(idx)
+        #np.random.seed(idx)
+        #random.seed(idx)
         mode = 'train' if idx < train_cut else 'test'
         output_dir = f"{save_dir}/{mode}/{job['folder_name']}"
         os.makedirs(output_dir, exist_ok=True)
