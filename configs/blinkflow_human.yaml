@@ -1,6 +1,6 @@
 image_width: 320
 image_height: 320
-use_gpu: true  # Enable GPU rendering (set to false to use CPU only)
+use_gpu: false  # Enable GPU rendering (set to false to use CPU only)
 use_humans: true  # Enable human rendering mode
 cycle_human_pairs: true  # Cycle through all (model, animation) pairs before repeating
 save_blend_file: false  # Save .blend file for debugging
@@ -26,6 +26,7 @@ human_x_offset: [-0.8, 0.8]  # Horizontal offset range for human placement
 human_distance: [0.5, 3.0]  # Distance range from camera for human placement
 human_z_offset: [-0.3, 0.0]  # Vertical offset range for human placement
 # Animation settings
+use_cycles: True
 animation_mode: 'linear'
 duration: 2.0  # Duration in seconds (fallback when not using animation length)
 duration_from_animation: true  # When true, override duration using FBX animation length and rgb_image_fps

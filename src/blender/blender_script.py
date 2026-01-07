@@ -1072,22 +1072,41 @@ def main():
             device.use = True
             print(f"Enabled GPU device: {device.name}")
         # Note: Eevee automatically uses GPU when available, no additional setup needed
+    else:
+        bpy.context.scene.cycles.device = 'CPU'
     
     # exr format which allows linear colorspace
     bproc.renderer.set_output_format("OPEN_EXR", 16)
     
-    # Use Eevee renderer (faster than Cycles)
-    bpy.context.scene.render.engine = 'BLENDER_EEVEE'
-    bpy.context.scene.eevee.taa_render_samples = 64
-    bpy.context.scene.eevee.use_gtao = True  # Ambient occlusion
-    bpy.context.scene.eevee.use_ssr = True   # Screen space reflections
+    if config.get('use_cycles', False):
+        bpy.context.scene.render.engine = 'CYCLES'
+        # Extremely fast Cycles settings
+        bpy.context.scene.cycles.samples = 4       
+        bpy.context.scene.cycles.use_denoising = False
+        bpy.context.scene.cycles.max_bounces = 0
+        bpy.context.scene.cycles.diffuse_bounces = 0
+        bpy.context.scene.cycles.glossy_bounces = 0
+        bpy.context.scene.cycles.transparent_max_bounces = 0
+        bpy.context.scene.cycles.transmission_bounces = 0
+        bpy.context.scene.cycles.volume_bounces = 0
+
+        # Turn off all expensive features
+        bpy.context.scene.cycles.use_caustics = False
+        bpy.context.scene.cycles.use_fast_gi = False
+    else:
+        # Use Eevee renderer (faster than Cycles)
+        bpy.context.scene.render.engine = 'BLENDER_EEVEE'
+        bpy.context.scene.eevee.taa_render_samples = 64
+        bpy.context.scene.eevee.use_gtao = True  # Ambient occlusion
+        bpy.context.scene.eevee.use_ssr = True   # Screen space reflections
+
     
     # Set Eevee to use GPU
     if use_gpu:
         bpy.context.scene.render.use_simplify = False
         print("GPU rendering enabled for Eevee")
     else:
-        bproc.renderer.set_cpu_threads(1)
+        bproc.renderer.set_cpu_threads(8)
 
     # TODO: Currently we only use slow fps RGB image for ref video, so close motion blur simulation
     bpy.context.scene.render.use_motion_blur = False
@@ -1126,12 +1145,6 @@ def main():
     apply_time_stretch_from_base(rgb_frames, event_frames)
 
     bproc.renderer.set_output_format("OPEN_EXR", 16)
-    bpy.context.scene.render.engine = 'BLENDER_EEVEE'
-    bpy.context.scene.eevee.taa_render_samples = 64
-    
-    # GPU already enabled in first pass, just skip CPU thread setting if using GPU
-    if not use_gpu:
-        bproc.renderer.set_cpu_threads(1)
 
     # bproc.renderer.enable_motion_blur(motion_blur_length=0.0)
     bpy.context.scene.render.use_motion_blur = False

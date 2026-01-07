@@ -276,24 +276,52 @@ def coords_grid(batch, ht, wd):
     coords = torch.stack(coords[::-1], dim=0).float()
     return coords[None].repeat(batch, 1, 1, 1)
 
-def flow_consistency(forward, backward):
-    # Input:
-    #     forward: HxWx2 numpy
-    #     backward: HxWx2 numpy
-    H, W, _ = forward.shape
-    coords = coords_grid(1, H, W).cuda().float().contiguous()
-    forward = torch.from_numpy(forward)[None].permute([0, 3, 1, 2]).cuda().float()
-    backward = torch.from_numpy(backward)[None].permute([0, 3, 1, 2]).cuda().float()
-    grid = (forward + coords).permute([0, 2, 3, 1]).contiguous()
-    grid[:, :, :, 0] = (grid[:, :, :, 0] * 2 - W + 1) / (W - 1)
-    grid[:, :, :, 1] = (grid[:, :, :, 1] * 2 - H + 1) / (H - 1)
-    backward = F.grid_sample(backward, grid, padding_mode='zeros', align_corners=False)
+def flow_consistency(forward, backward, device="cpu"):
+    """
+    forward/backward: HxWx2 numpy arrays
+    device: "cpu", "cuda", or torch.device(...)
+    """
+    device = torch.device(device)
 
-    consistency = forward + backward
-    consistency = consistency[0].permute([1,2,0])
-    valid = torch.norm(consistency, dim=2) < 1
-    valid = torch.unsqueeze(valid, dim=2).to(dtype=torch.float32, device='cpu').numpy()
-    return valid
+    # Optional safety: if someone passes "cuda" but it's not available, fall back.
+    if device.type == "cuda" and not torch.cuda.is_available():
+        device = torch.device("cpu")
+
+    H, W, _ = forward.shape
+
+    coords = coords_grid(1, H, W).to(device=device, dtype=torch.float32).contiguous()
+
+    forward_t = (
+        torch.from_numpy(forward)
+        .unsqueeze(0)                 # [1,H,W,2]
+        .permute(0, 3, 1, 2)          # [1,2,H,W]
+        .to(device=device, dtype=torch.float32)
+    )
+
+    backward_t = (
+        torch.from_numpy(backward)
+        .unsqueeze(0)
+        .permute(0, 3, 1, 2)
+        .to(device=device, dtype=torch.float32)
+    )
+
+    # Build sampling grid in normalized coords
+    grid = (forward_t + coords).permute(0, 2, 3, 1).contiguous()  # [1,H,W,2]
+    grid[..., 0] = (grid[..., 0] * 2 - W + 1) / (W - 1)
+    grid[..., 1] = (grid[..., 1] * 2 - H + 1) / (H - 1)
+
+    backward_warped = F.grid_sample(
+        backward_t, grid, padding_mode="zeros", align_corners=False
+    )
+
+    consistency = forward_t + backward_warped                   # [1,2,H,W]
+    consistency = consistency[0].permute(1, 2, 0)               # [H,W,2]
+
+    valid = (torch.norm(consistency, dim=2) < 1.0)              # [H,W]
+    valid = valid.unsqueeze(2).to(dtype=torch.float32)          # [H,W,1]
+
+    return valid.cpu().numpy()
+
 
 
 def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True):
