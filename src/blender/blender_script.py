@@ -213,17 +213,28 @@ def load_human_fbx(model_path, animation_path=None):
         for obj in anim_objs:
             bpy.data.objects.remove(obj, do_unlink=True)
     
-    # Adjust facing and start position for locomotion animations so actors move across the camera view
-    if animation_path and locomotion:
-        yaw_choices = config.get('locomotion_yaw_choices', [-np.pi/2, np.pi/2])
-        yaw_offset = random.uniform(yaw_choices[0], yaw_choices[1])
-        if armature:
-            armature.rotation_euler[2] += yaw_offset
-            # Move start position backward along heading so the actor enters the frame
-            start_offset = config.get('locomotion_start_offset', 4.0)
-            yaw = armature.rotation_euler[2]
-            forward = np.array([np.sin(yaw), np.cos(yaw), 0.0], dtype=float)
-            armature.location = armature.location - Vector((forward * start_offset).tolist())
+    # Adjust facing and start position for locomotion animations so actors traverse the camera view
+    if animation_path and locomotion and armature:
+        # Camera at origin looking +Y. Choose a path that crosses the view near center, entering from a side.
+        y_cross = random.uniform(1.2, 3.0)          # depth where path crosses the view
+        x_cross = random.uniform(-0.4, 0.4)         # horizontal crossing near center
+        span = random.uniform(3.0, 5.0)             # horizontal travel distance
+        direction = random.choice([-1.0, 1.0])      # -1: right->left, +1: left->right
+
+        start_x = x_cross - direction * (span / 2.0)
+        end_x = x_cross + direction * (span / 2.0)
+        start_y = y_cross + random.uniform(0.5, 1.0)
+        end_y = y_cross + random.uniform(0.8, 1.5)
+
+        heading = math.atan2(end_x - start_x, end_y - start_y)
+        jitter = random.uniform(-0.39, 0.39)  # ~±8.5 deg jitter
+        armature.rotation_euler[2] = heading + jitter
+
+        # Place start off-center so the actor enters the frame
+        armature.location[0] = start_x
+        armature.location[1] = start_y
+        # Record locomotion flag for downstream camera logic
+        config['last_is_locomotion'] = True
 
     # Wrap mesh objects in BlenderProc MeshObjects
     mesh_objs = []
@@ -923,12 +934,14 @@ def setup_human_env(mode):
         else:
             print("duration_from_animation requested but no animation frame length found; falling back to config duration")
     
-    # Get the last created human position for camera targeting
-    # Assuming typical Mixamo model is ~180cm tall after 0.01 scale
-    # Camera should look at upper chest area (~1.2m high) to show 80%+ of body
-    if human_objs:
+    # Camera targeting: optionally keep camera fixed for locomotion. For side-to-side
+    # traversals, rely on a static look-at to avoid re-centering on the actor.
+    locomotion_active = config.get('last_is_locomotion', False)
+    lock_on_human = config.get('camera_lock_on_human', True)
+    default_look_at = config.get('camera_default_look_at', [0, 2.5, 1.2])
+
+    if lock_on_human and not locomotion_active and human_objs:
         # Get the armature position (stored during load_human_fbx)
-        # The human was placed randomly, retrieve those coordinates
         human_armature = None
         for obj in bpy.data.objects:
             if obj.type == 'ARMATURE':
@@ -941,10 +954,9 @@ def setup_human_env(mode):
             human_z = human_armature.location[2] + 1.2  # Look at chest height (1.2m above feet)
             look_at = [human_x, human_y, human_z]
         else:
-            # Fallback if no armature found
-            look_at = [0, 3, 1.2]
+            look_at = default_look_at
     else:
-        look_at = [0, 3, 1.2]
+        look_at = default_look_at
     
     # Compute camera rotation to look at the human
     cam_euler = euler_from_look_at(cam_position, look_at, up)
