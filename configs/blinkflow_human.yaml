@@ -8,14 +8,14 @@ save_hdr_mp4: false
 save_rgb_reference: true
 save_rgb_event_input: true
 event_noise_enabled: true  # Inject spurious DVS-like background events
-event_noise_rate: 0.02      # Fraction of normal event count to add as noise (e.g., 0.01–0.05)
+event_noise_rate: 0.05      # Fraction of normal event count to add as noise (e.g., 0.01–0.05)
 
 # Human model and animation directories
 human_model_dir: 'data/human_models'
 human_anim_dir: 'data/human_animations'
-active_human_models: ['girl1']  # Optional list of model basenames to include; empty means all
-active_human_anims: []    # Optional list of animation basenames to include; empty means all
-clips_per_character: 30    # 0 means default to seq_range length; otherwise controls clips per active model.
+active_human_models: ["boy2"]  # Optional list of model basenames to include; empty means all
+active_human_anims: ["Running"]    # Optional list of animation basenames to include; empty means all
+clips_per_character: 1    # 0 means default to seq_range length; otherwise controls clips per active model.
 
 # HDR environment for lighting
 hdr_dir: 'data/haven/hdris/'
@@ -24,6 +24,7 @@ hdr_dir: 'data/haven/hdris/'
 human_x_offset: [-0.8, 0.8]  # Horizontal offset range for human placement
 human_distance: [0.5, 3.5]  # Distance range from camera for human placement
 human_z_offset: [-0.3, 0.0]  # Vertical offset range for human placement
+human_z_rotation: [-0.785, 0.785]
 # Animation settings
 use_cycles: True
 animation_mode: 'linear'
@@ -33,7 +34,7 @@ event_image_fps: 300 # FPS for event simulation
 rgb_image_fps: 30  # FPS for RGB frames
 num_keyframes: 2
 locomotion_keywords: ['run','walk','jog','sprint']
-locomotion_yaw_choices: [0.0, -1.5708, 1.5708]
+locomotion_yaw_choices: [-0.785, 0.785]
 locomotion_start_offset: 4.0
 loop_locomotion: false
 use_fill_light: true

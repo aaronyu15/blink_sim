@@ -151,6 +151,8 @@ def load_human_fbx(model_path, animation_path=None):
     
     # Rotation: 90 degrees around X axis to stand upright
     # Mixamo models are exported lying down, need to rotate them up
+    z_rotation = random.uniform(config['human_z_rotation'][0], config['human_z_rotation'][1])
+    rotation = [np.pi/2, 0, z_rotation]
     rotation = [np.pi/2, 0, 0]
     
     # Scale: 0.01 to convert from cm (Mixamo units) to meters
@@ -213,8 +215,8 @@ def load_human_fbx(model_path, animation_path=None):
     
     # Adjust facing and start position for locomotion animations so actors move across the camera view
     if animation_path and locomotion:
-        yaw_choices = config.get('locomotion_yaw_choices', [0.0, -np.pi/2, np.pi/2])
-        yaw_offset = random.choice(yaw_choices)
+        yaw_choices = config.get('locomotion_yaw_choices', [-np.pi/2, np.pi/2])
+        yaw_offset = random.uniform(yaw_choices[0], yaw_choices[1])
         if armature:
             armature.rotation_euler[2] += yaw_offset
             # Move start position backward along heading so the actor enters the frame
