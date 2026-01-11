@@ -1139,8 +1139,22 @@ def main():
         'num_frame': event_frames,
         'num_keyframes': config['num_keyframes'],
     })
-    bpy.context.scene.render.frame_map_old = rgb_frames
-    bpy.context.scene.render.frame_map_new = event_frames
+    
+    # Scale skeletal animation keyframes to match the new frame range
+    # This ensures the FBX animation plays through the same motion over event_frames as it did over rgb_frames
+    scale_factor = float(event_frames) / float(rgb_frames)
+    for obj in bpy.data.objects:
+        if obj.type == 'ARMATURE' and obj.animation_data and obj.animation_data.action:
+            action = obj.animation_data.action
+            for fcu in action.fcurves:
+                for kf in fcu.keyframe_points:
+                    kf.co.x *= scale_factor
+                    kf.handle_left.x *= scale_factor
+                    kf.handle_right.x *= scale_factor
+                fcu.update()
+    
+    bpy.context.scene.render.frame_map_old = 1
+    bpy.context.scene.render.frame_map_new = 1
     bpy.context.scene.frame_start = 0
     # Use end as exclusive upper bound to produce exactly `target` frames when iterating range(frame_start, frame_end)
     bpy.context.scene.frame_end = event_frames
