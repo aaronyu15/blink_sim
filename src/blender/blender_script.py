@@ -153,7 +153,6 @@ def load_human_fbx(model_path, animation_path=None):
     # Mixamo models are exported lying down, need to rotate them up
     z_rotation = random.uniform(config['human_z_rotation'][0], config['human_z_rotation'][1])
     rotation = [np.pi/2, 0, z_rotation]
-    rotation = [np.pi/2, 0, 0]
     
     # Scale: 0.01 to convert from cm (Mixamo units) to meters
     scale = [0.01, 0.01, 0.01]
@@ -171,7 +170,7 @@ def load_human_fbx(model_path, animation_path=None):
     if animation_path and os.path.exists(animation_path):
         locomotion_keywords = config.get('locomotion_keywords', ['run', 'walk', 'jog', 'sprint'])
         fname = os.path.basename(animation_path).lower()
-        locomotion = any(k in fname for k in locomotion_keywords)
+        locomotion = any(k in fname for k in locomotion_keywords) and not ('strafe' in fname)
         # Import animation FBX (this contains the armature with animation data)
         bpy.ops.import_scene.fbx(filepath=animation_path)
         anim_objs = bpy.context.selected_objects
@@ -203,7 +202,7 @@ def load_human_fbx(model_path, animation_path=None):
                 anim_start = int(animation_action.frame_range[0])
                 anim_end = int(animation_action.frame_range[1])
                 anim_length = anim_end - anim_start
-                
+
                 # Store animation range for later retiming
                 armature["anim_start"] = anim_start
                 armature["anim_end"] = anim_end
@@ -218,7 +217,7 @@ def load_human_fbx(model_path, animation_path=None):
         # Camera at origin looking +Y. Choose a path that crosses the view near center, entering from a side.
         y_cross = random.uniform(1.2, 3.0)          # depth where path crosses the view
         x_cross = random.uniform(-0.4, 0.4)         # horizontal crossing near center
-        span = random.uniform(3.0, 5.0)             # horizontal travel distance
+        span = random.uniform(1.0, 2.0)             # horizontal travel distance
         direction = random.choice([-1.0, 1.0])      # -1: right->left, +1: left->right
 
         start_x = x_cross - direction * (span / 2.0)
@@ -227,7 +226,7 @@ def load_human_fbx(model_path, animation_path=None):
         end_y = y_cross + random.uniform(0.8, 1.5)
 
         heading = math.atan2(end_x - start_x, end_y - start_y)
-        jitter = random.uniform(-0.39, 0.39)  # ~±8.5 deg jitter
+        jitter = random.uniform(-0.12, 0.12)  
         armature.rotation_euler[2] = heading + jitter
 
         # Place start off-center so the actor enters the frame
@@ -265,18 +264,6 @@ def load_human_fbx(model_path, animation_path=None):
     return mesh_objs
 
 
-def apply_time_stretch_from_base(base_frames: int, target_frames: int):
-    """Map a higher-FPS render onto the same motion covered by a lower-FPS base.
-    base_frames: frame count of the reference clip (e.g., RGB).
-    target_frames: frame count of the stretched clip (e.g., events).
-    """
-    base = max(1, int(base_frames))
-    target = max(1, int(target_frames))
-    bpy.context.scene.render.frame_map_old = base
-    bpy.context.scene.render.frame_map_new = target
-    bpy.context.scene.frame_start = 0
-    # Use end as exclusive upper bound to produce exactly `target` frames when iterating range(frame_start, frame_end)
-    bpy.context.scene.frame_end = target
 
 def check_obj_hit(obj, origin, direction, max_distance):
     world2local = np.linalg.inv(obj.get_local2world_mat())
@@ -921,18 +908,22 @@ def setup_human_env(mode):
     human_objs = load_human_fbx(model_path, anim_path)
 
     # Optionally consider animation length; clamp duration to min(config duration, animation length)
-    if config.get('duration_from_animation', False):
-        if 'anim_frame_length' in config:
-            anim_len_frames = config['anim_frame_length']
-            fps = config.get('rgb_image_fps', 10)
-            anim_sec = float(anim_len_frames) / float(fps)
+    if 'anim_frame_length' in config:
+        anim_len_frames = config['anim_frame_length']
+        fps = config.get('rgb_image_fps', 10)
+        anim_sec = float(anim_len_frames) / float(fps)
+        if config.get('duration_from_animation', False):
+            new_dur = anim_sec
+            config['duration'] = new_dur
+        else:
             cfg_dur = config.get('duration', anim_sec)
             new_dur = min(cfg_dur, anim_sec)
             if abs(new_dur - cfg_dur) > 1e-6:
                 print(f"Clamping duration to animation length: anim {anim_sec:.3f}s < cfg {cfg_dur:.3f}s -> {new_dur:.3f}s")
             config['duration'] = new_dur
-        else:
-            print("duration_from_animation requested but no animation frame length found; falling back to config duration")
+    else:
+        print("duration_from_animation requested but no animation frame length found; falling back to config duration")
+
     
     # Camera targeting: optionally keep camera fixed for locomotion. For side-to-side
     # traversals, rely on a static look-at to avoid re-centering on the actor.
@@ -1142,19 +1133,40 @@ def main():
     event_fps = config['event_image_fps']
     event_frames = int(round(event_fps * config['duration']))  # exact count
     bpy.context.scene.render.fps = event_fps
+
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
         'num_frame': event_frames,
         'num_keyframes': config['num_keyframes'],
     })
-    apply_time_stretch_from_base(rgb_frames, event_frames)
+    bpy.context.scene.render.frame_map_old = rgb_frames
+    bpy.context.scene.render.frame_map_new = event_frames
+    bpy.context.scene.frame_start = 0
+    # Use end as exclusive upper bound to produce exactly `target` frames when iterating range(frame_start, frame_end)
+    bpy.context.scene.frame_end = event_frames
 
     bproc.renderer.set_output_format("OPEN_EXR", 16)
     if config.get('use_cycles', False):
         bpy.context.scene.render.engine = 'CYCLES'
+        # Extremely fast Cycles settings
+        bpy.context.scene.cycles.samples = 4       
+        bpy.context.scene.cycles.use_denoising = False
+        bpy.context.scene.cycles.max_bounces = 0
+        bpy.context.scene.cycles.diffuse_bounces = 0
+        bpy.context.scene.cycles.glossy_bounces = 0
+        bpy.context.scene.cycles.transparent_max_bounces = 0
+        bpy.context.scene.cycles.transmission_bounces = 0
+        bpy.context.scene.cycles.volume_bounces = 0
+
+        # Turn off all expensive features
+        bpy.context.scene.cycles.use_caustics = False
+        bpy.context.scene.cycles.use_fast_gi = False
     else:
+        # Use Eevee renderer (faster than Cycles)
         bpy.context.scene.render.engine = 'BLENDER_EEVEE'
         bpy.context.scene.eevee.taa_render_samples = 64
+        bpy.context.scene.eevee.use_gtao = True  # Ambient occlusion
+        bpy.context.scene.eevee.use_ssr = True   # Screen space reflections
     
     # GPU already enabled in first pass, just skip CPU thread setting if using GPU
     if not use_gpu:

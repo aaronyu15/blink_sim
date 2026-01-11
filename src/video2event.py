@@ -42,9 +42,10 @@ def _make_events_from_voltmeter(nFrames, input_dir, interpTimes):
             events_list.append(newEvents)
     try:
         events_np = np.concatenate(events_list, axis=0)
+        return events_np, True
     except:
+        return None, False
         import pdb; pdb.set_trace()
-    return events_np
 
 
 def _make_events_from_v2e(nFrames, input_dir, interpTimes):
@@ -113,7 +114,12 @@ def make_events(output_dir, size, nFrames, fps=300, save_h5=False, save_event_vo
     interpTimes = np.linspace(0, nFrames/fps, nFrames, True).tolist()
 
     print(f'*** Stage 3/3: emulating DVS events from {nFrames} frames')
-    events_np = _make_events_from_voltmeter(nFrames, input_dir, interpTimes)
+    events_np, valid = _make_events_from_voltmeter(nFrames, input_dir, interpTimes)
+    if not valid:
+        if save_h5:
+            os.system(f'mkdir -p {output_dir}/events_NOT_VALID')
+            return 0
+
     events_np = _inject_noise(events_np, size, nFrames, fps, noise_enabled=noise_enabled, noise_rate=noise_rate)
     # events_np = _make_events_from_v2e(nFrames, input_dir, interpTimes)
     # events_np = _make_events_from_esim(nFrames, input_dir, interpTimes)

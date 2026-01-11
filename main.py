@@ -106,11 +106,20 @@ def main(config):
         # If requested, derive frame counts from rendered outputs (animation length)
         rgb_frames = base_rgb_frames
         event_frames = base_event_frames
+
+        rgb_h5_dir = os.path.join(output_dir, 'hdf5', 'rgb_and_flow')
+        evt_h5_dir = os.path.join(output_dir, 'hdf5', 'event_input')
+        rgb_found = len(os.listdir(rgb_h5_dir)) if os.path.exists(rgb_h5_dir) else 0
+        evt_found = len(os.listdir(evt_h5_dir)) if os.path.exists(evt_h5_dir) else 0
         if duration_from_anim:
-            rgb_h5_dir = os.path.join(output_dir, 'hdf5', 'rgb_and_flow')
-            evt_h5_dir = os.path.join(output_dir, 'hdf5', 'event_input')
-            rgb_found = len(os.listdir(rgb_h5_dir)) if os.path.exists(rgb_h5_dir) else 0
-            evt_found = len(os.listdir(evt_h5_dir)) if os.path.exists(evt_h5_dir) else 0
+            if rgb_found == 0 or evt_found == 0:
+                print(f"duration_from_animation enabled but could not count frames (rgb: {rgb_found}, event: {evt_found}). Falling back to config duration.")
+            else:
+                rgb_frames = rgb_found
+                event_frames = evt_found
+                capped_duration = rgb_frames / float(rgb_fps)
+                print(f"Derived duration from animation output (capped by config): {rgb_frames} rgb frames @ {rgb_fps} fps -> {capped_duration:.3f}s ")
+        else:
             if rgb_found == 0 or evt_found == 0:
                 print(f"duration_from_animation enabled but could not count frames (rgb: {rgb_found}, event: {evt_found}). Falling back to config duration.")
             else:
