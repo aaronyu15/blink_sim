@@ -33,7 +33,7 @@ camera_target_mode: 'hips_bone'  # 'hips_bone' uses animated hips transform; 'mo
 camera_target_bone: 'Hips'  # Preferred bone name for camera_target_mode='hips_bone' (auto-fallback to hips/pelvis aliases)
 camera_target_frame: 0  # Frame used when camera_target_mode='model_initial' (default: animation start if available)
 camera_cube_extent: 40.0  # Half-side length of cube around origin (±25 in X and Y)
-camera_z_range: [5.0, 40.0]  # Z range for upper half of cube
+camera_z_range: [5.0, 30.0]  # Z range for upper half of cube
 camera_pitch_z_reference: 8.0  # Z height where pitch = camera_pitch_base_deg (typically 90° for straight down)
 camera_pitch_base_deg: 90.0  # Pitch angle in degrees at z_reference; Y rot = 0, X rot = pitch
 camera_pitch_scale_per_unit_z: 2.0  # Change in pitch per unit of Z above/below reference (degrees/unit)
@@ -41,9 +41,9 @@ camera_pitch_max_z_lookat_origin: 25.0  # At/above this Z, ignore pitch curve an
 camera_follow_enabled: true  # If true, camera follows behind hips motion using inertia
 camera_follow_rotation_only: true  # Keep camera fixed in place; only rotate to follow hips target
 camera_follow_edge_tracking: true  # Only pan/tilt when hips near image edge
-camera_follow_edge_margin: 0.25  # Normalized margin (0-0.5); larger means tracking starts earlier
-camera_follow_min_target_shift: 0.30  # Meters; ignore tiny hips jitter when deciding to pan/tilt
-camera_follow_distance: 8.0  # Distance kept behind motion direction
+camera_follow_edge_margin: 0.5  # Normalized margin (0-0.5); larger means tracking starts earlier
+camera_follow_min_target_shift: 0.20  # Meters; ignore tiny hips jitter when deciding to pan/tilt
+camera_follow_distance: 4.0  # Distance kept behind motion direction
 camera_follow_height_offset: 2.0  # Vertical offset above hips target
 camera_follow_inertia: 0.45  # 0=no smoothing, closer to 1=slower smoother follow
 
