@@ -1,4 +1,5 @@
 data/
 output/
+output_old/
 **/__pycache__/
 y/
