@@ -8,6 +8,7 @@ from skspatial.objects import Line, Sphere
 import argparse, bpy, math, pickle, cv2, os, sys, shutil
 import numpy as np
 from mathutils import Vector
+from bpy_extras.object_utils import world_to_camera_view
 from blenderproc.python.material.MaterialLoaderUtility import convert_to_materials
 sys.path.insert(0, os.path.abspath(__file__+'/../../..'))
 from src.blender.movement import animation
@@ -108,7 +109,12 @@ def euler_from_height_dependent_pitch(cam_position, target, z_reference=8.0, bas
     # Height-dependent pitch: compute pitch angle based on camera Z position
     cam_z = cam_pos[2]
     pitch_deg = base_pitch_deg + pitch_scale * (cam_z - z_reference)
-    pitch_rad = np.radians(pitch_deg)
+
+    # Convert legacy pitch into a stable downward-tilt angle:
+    # - <= 90 deg: level (no downward tilt)
+    # - > 90 deg: progressively tilt down, clamped for stability
+    down_tilt_deg = np.clip(max(0.0, pitch_deg - 90.0), 0.0, 89.0)
+    down_tilt_rad = np.radians(down_tilt_deg)
     
     # Compute horizontal direction from camera towards target in XY plane
     horiz_dir = target_pos[:2] - cam_pos[:2]
@@ -126,9 +132,9 @@ def euler_from_height_dependent_pitch(cam_position, target, z_reference=8.0, bas
     # This look-at point is roughly where the camera should be aiming
     look_ahead_dist = 50.0  # How far ahead to compute the look-at point
     forward_horiz = horiz_dir * look_ahead_dist
-    # Keep vertical component always downward in this mode.
-    # This prevents pitch values above 90 deg from flipping the camera to look upward.
-    forward_vert = -look_ahead_dist * abs(np.tan(pitch_rad))
+    # Vertical component from bounded downward tilt.
+    # At/under z_reference this is 0 (more level); above z_reference it tilts down smoothly.
+    forward_vert = -look_ahead_dist * np.tan(down_tilt_rad)
     
     # Effective look-at point
     effective_lookat = cam_pos + np.array([forward_horiz[0], forward_horiz[1], forward_vert])
@@ -158,6 +164,125 @@ def euler_from_look_at(position, target, up):
     euler = R.from_matrix(T[:3,:3]).as_euler('xyz', degrees=False)
 
     return euler
+
+
+def model_center_world(mesh_objs, frame=None):
+    """Estimate model center in world coordinates using evaluated mesh bounds."""
+    if mesh_objs is None or len(mesh_objs) == 0:
+        return np.array([0.0, 0.0, 0.0], dtype=float)
+
+    scene = bpy.context.scene
+    original_frame = scene.frame_current
+    if frame is not None:
+        scene.frame_set(int(frame))
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    pts = []
+
+    for obj in mesh_objs:
+        bpy_obj = obj.blender_obj if hasattr(obj, 'blender_obj') else obj
+        try:
+            eval_obj = bpy_obj.evaluated_get(depsgraph)
+            mw = eval_obj.matrix_world
+            for corner in eval_obj.bound_box:
+                p = mw @ Vector(corner)
+                pts.append([p.x, p.y, p.z])
+        except Exception:
+            continue
+
+    if frame is not None:
+        scene.frame_set(original_frame)
+
+    if len(pts) == 0:
+        return np.array([0.0, 0.0, 0.0], dtype=float)
+
+    return np.mean(np.asarray(pts, dtype=float), axis=0)
+
+
+def _find_primary_armature(mesh_objs):
+    """Find the armature driving the imported human meshes."""
+    for obj in mesh_objs:
+        bpy_obj = obj.blender_obj if hasattr(obj, 'blender_obj') else obj
+        parent = getattr(bpy_obj, 'parent', None)
+        if parent is not None and parent.type == 'ARMATURE':
+            return parent
+    for arm in bpy.data.objects:
+        if arm.type == 'ARMATURE':
+            return arm
+    return None
+
+
+def bone_world_position(mesh_objs, bone_name='Hips', frame=None):
+    """Return a pose-bone world position (head), fallback to model center if unavailable."""
+    armature = _find_primary_armature(mesh_objs)
+    if armature is None:
+        return model_center_world(mesh_objs, frame=frame)
+
+    scene = bpy.context.scene
+    original_frame = scene.frame_current
+    if frame is not None:
+        scene.frame_set(int(frame))
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    arm_eval = armature.evaluated_get(depsgraph)
+    pose_bones = arm_eval.pose.bones
+
+    # Prefer exact name, then common hips aliases, then fuzzy fallback.
+    candidates = [
+        bone_name,
+        'Hips',
+        'hips',
+        'mixamorig:Hips',
+        'pelvis',
+        'Pelvis',
+    ]
+    pb = None
+    for name in candidates:
+        if name in pose_bones:
+            pb = pose_bones[name]
+            break
+    if pb is None:
+        for name in pose_bones.keys():
+            lname = name.lower()
+            if 'hip' in lname or 'pelvis' in lname:
+                pb = pose_bones[name]
+                break
+
+    if pb is None:
+        if frame is not None:
+            scene.frame_set(original_frame)
+        return model_center_world(mesh_objs, frame=frame)
+
+    world_head = arm_eval.matrix_world @ pb.head
+
+    if frame is not None:
+        scene.frame_set(original_frame)
+
+    return np.array([world_head.x, world_head.y, world_head.z], dtype=float)
+
+
+def point_view_coords(cam_obj, point_world, cam_location, cam_euler):
+    """Project a world point into normalized camera view coordinates for a hypothetical camera pose."""
+    scene = bpy.context.scene
+    old_loc = cam_obj.location.copy()
+    old_rot = cam_obj.rotation_euler.copy()
+    try:
+        cam_obj.location = Vector(cam_location)
+        cam_obj.rotation_euler = cam_euler
+        p = Vector(point_world)
+        co = world_to_camera_view(scene, cam_obj, p)
+        return float(co.x), float(co.y), float(co.z)
+    finally:
+        cam_obj.location = old_loc
+        cam_obj.rotation_euler = old_rot
+
+
+def target_near_edge(cam_obj, point_world, cam_location, cam_euler, edge_margin=0.15):
+    """True if target is near/outside view edge or behind camera."""
+    x, y, z = point_view_coords(cam_obj, point_world, cam_location, cam_euler)
+    if z <= 0.0:
+        return True
+    return (x < edge_margin or x > 1.0 - edge_margin or y < edge_margin or y > 1.0 - edge_margin)
 
 def make_action_cyclic(action):
     """Add cyclic modifiers so an action loops for the full render duration."""
@@ -982,7 +1107,18 @@ def setup_human_env(mode):
 
     
     # Camera motion controls all randomization; model stays untouched.
-    look_at = config.get('camera_target', [0.0, 0.0, 0.0])
+    target_mode = config.get('camera_target_mode', 'hips_bone')
+    if target_mode == 'hips_bone':
+        target_frame = config.get('camera_target_frame', config.get('anim_frame_start', 0))
+        target_bone = config.get('camera_target_bone', 'Hips')
+        look_at = bone_world_position(human_objs, bone_name=target_bone, frame=target_frame).tolist()
+        print(f"Camera target from bone '{target_bone}' at frame {target_frame}: {look_at}")
+    elif target_mode == 'model_initial':
+        target_frame = config.get('camera_target_frame', config.get('anim_frame_start', 0))
+        look_at = model_center_world(human_objs, frame=target_frame).tolist()
+        print(f"Camera target from model center at frame {target_frame}: {look_at}")
+    else:
+        look_at = config.get('camera_target', [0.0, 0.0, 0.0])
     camera_cube_extent = config.get('camera_cube_extent', 25.0)  # Half-side length of cube
     camera_z_range = config.get('camera_z_range', [5.0, 50.0])   # Z range for upper half
 
@@ -996,38 +1132,125 @@ def setup_human_env(mode):
 
     cam_position = [cam_x, cam_y, cam_z]
     
-    # Compute camera rotation with height-dependent pitch
-    # At z_reference, pitch = base_pitch_deg; changes by pitch_scale per unit Z
-    z_reference = config.get('camera_pitch_z_reference', 8.0)
-    base_pitch_deg = config.get('camera_pitch_base_deg', 90.0)
-    pitch_scale = config.get('camera_pitch_scale_per_unit_z', 2.0)
-    max_z_lookat_origin = config.get('camera_pitch_max_z_lookat_origin', 25.0)
-    if cam_z >= max_z_lookat_origin:
-        # Prevent over-tilt at high altitude by using direct look-at to the target.
-        cam_euler = euler_from_look_at(cam_position, look_at, up)
-    else:
-        cam_euler = euler_from_height_dependent_pitch(
-            cam_position,
-            look_at,
-            z_reference=z_reference,
-            base_pitch_deg=base_pitch_deg,
-            pitch_scale=pitch_scale,
-            up=up,
-        )
-    
-    # Set the actual camera object's location and rotation in the Blender scene
-    # so it appears at the correct position when the .blend file is opened/saved
-    if bpy.context.scene.camera:
-        bpy.context.scene.camera.location = cam_position
-        bpy.context.scene.camera.rotation_euler = cam_euler
-    
-    # Create camera poses - duplicate for interpolation compatibility
-    # Fixed camera needs multiple identical poses to satisfy interpolation requirements
     num_keyframes = config.get('num_keyframes', 2)
-    cam_pose = [[cam_position, cam_euler]] * num_keyframes
-    
-    # Add camera-based fill to brighten foreground near the camera
-    setup_fill_light(cam_position, look_at)
+    follow_enabled = config.get('camera_follow_enabled', False)
+
+    if follow_enabled and num_keyframes >= 2:
+        target_bone = config.get('camera_target_bone', 'Hips')
+        rotation_only = config.get('camera_follow_rotation_only', True)
+        follow_distance = float(config.get('camera_follow_distance', 8.0))
+        follow_height_offset = float(config.get('camera_follow_height_offset', 2.0))
+        inertia = float(config.get('camera_follow_inertia', 0.85))
+        inertia = min(max(inertia, 0.0), 0.99)
+
+        anim_start = float(config.get('anim_frame_start', 0.0))
+        anim_len = float(config.get('anim_frame_length', max(1, num_keyframes)))
+        sample_frames = np.linspace(anim_start, anim_start + max(1.0, anim_len - 1.0), num_keyframes)
+
+        hip_points = [bone_world_position(human_objs, bone_name=target_bone, frame=f) for f in sample_frames]
+
+        cam_pose = []
+        if rotation_only:
+            # Keep camera fixed in place and only rotate to track hips with inertia.
+            cam_fixed = np.array(cam_position, dtype=float)
+            edge_track = bool(config.get('camera_follow_edge_tracking', True))
+            edge_margin = float(config.get('camera_follow_edge_margin', 0.15))
+            min_target_shift = float(config.get('camera_follow_min_target_shift', 0.10))
+            cam_obj = bpy.context.scene.camera
+            target_prev = np.array(hip_points[0], dtype=float)
+            hip_prev_raw = np.array(hip_points[0], dtype=float)
+            first_target = target_prev + np.array([0.0, 0.0, follow_height_offset], dtype=float)
+            current_euler = euler_from_look_at(cam_fixed.tolist(), first_target.tolist(), up)
+            for i in range(num_keyframes):
+                hip_raw = np.array(hip_points[i], dtype=float)
+                hip = hip_raw + np.array([0.0, 0.0, follow_height_offset], dtype=float)
+                should_track = True
+                if edge_track and cam_obj is not None:
+                    near_edge = target_near_edge(
+                        cam_obj,
+                        hip_raw.tolist(),
+                        cam_fixed.tolist(),
+                        current_euler,
+                        edge_margin=edge_margin,
+                    )
+                    moved_enough = np.linalg.norm(hip_raw - hip_prev_raw) >= min_target_shift
+                    should_track = near_edge and moved_enough
+
+                if should_track:
+                    target_smooth = inertia * target_prev + (1.0 - inertia) * hip
+                    cam_euler_curr = euler_from_look_at(cam_fixed.tolist(), target_smooth.tolist(), up)
+                else:
+                    # Keep pan/tilt fixed while subject remains comfortably inside frame.
+                    target_smooth = target_prev
+                    cam_euler_curr = current_euler
+
+                cam_pose.append([cam_fixed.tolist(), cam_euler_curr])
+                target_prev = target_smooth
+                hip_prev_raw = hip_raw
+                current_euler = cam_euler_curr
+        else:
+            # Optional full follow mode: move behind motion direction with inertia.
+            cam_prev = np.array(cam_position, dtype=float)
+            last_dir = None
+            for i in range(num_keyframes):
+                hip = np.array(hip_points[i], dtype=float)
+                if i < num_keyframes - 1:
+                    d = np.array(hip_points[i + 1], dtype=float) - hip
+                else:
+                    d = hip - np.array(hip_points[i - 1], dtype=float)
+
+                d_xy = np.array([d[0], d[1], 0.0], dtype=float)
+                d_norm = np.linalg.norm(d_xy)
+                if d_norm > 1e-6:
+                    move_dir = d_xy / d_norm
+                    last_dir = move_dir
+                else:
+                    move_dir = last_dir if last_dir is not None else np.array([0.0, 1.0, 0.0], dtype=float)
+
+                desired = hip - move_dir * follow_distance + np.array([0.0, 0.0, follow_height_offset], dtype=float)
+                cam_curr = inertia * cam_prev + (1.0 - inertia) * desired
+                cam_euler_curr = euler_from_look_at(cam_curr.tolist(), hip.tolist(), up)
+                cam_pose.append([cam_curr.tolist(), cam_euler_curr])
+                cam_prev = cam_curr
+
+        # Set camera to first pose for debug .blend visibility
+        if bpy.context.scene.camera:
+            bpy.context.scene.camera.location = cam_pose[0][0]
+            bpy.context.scene.camera.rotation_euler = cam_pose[0][1]
+
+        # Add camera-based fill using first camera/target pair
+        setup_fill_light(cam_pose[0][0], hip_points[0].tolist())
+    else:
+        # Compute camera rotation with height-dependent pitch
+        # At z_reference, pitch = base_pitch_deg; changes by pitch_scale per unit Z
+        z_reference = config.get('camera_pitch_z_reference', 8.0)
+        base_pitch_deg = config.get('camera_pitch_base_deg', 90.0)
+        pitch_scale = config.get('camera_pitch_scale_per_unit_z', 2.0)
+        max_z_lookat_origin = config.get('camera_pitch_max_z_lookat_origin', 25.0)
+        if cam_z >= max_z_lookat_origin:
+            # Prevent over-tilt at high altitude by using direct look-at to the target.
+            cam_euler = euler_from_look_at(cam_position, look_at, up)
+        else:
+            cam_euler = euler_from_height_dependent_pitch(
+                cam_position,
+                look_at,
+                z_reference=z_reference,
+                base_pitch_deg=base_pitch_deg,
+                pitch_scale=pitch_scale,
+                up=up,
+            )
+
+        # Set the actual camera object's location and rotation in the Blender scene
+        # so it appears at the correct position when the .blend file is opened/saved
+        if bpy.context.scene.camera:
+            bpy.context.scene.camera.location = cam_position
+            bpy.context.scene.camera.rotation_euler = cam_euler
+
+        # Fixed camera needs multiple identical poses to satisfy interpolation requirements
+        cam_pose = [[cam_position, cam_euler]] * num_keyframes
+
+        # Add camera-based fill to brighten foreground near the camera
+        setup_fill_light(cam_position, look_at)
 
     # Human objects stay in place (skeletal animation handles movement)
     # But we need to provide poses for each keyframe for the animation system

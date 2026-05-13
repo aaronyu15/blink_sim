@@ -1,6 +1,6 @@
 image_width: 320
 image_height: 320
-use_gpu: false  # Enable GPU rendering (set to false to use CPU only)
+use_gpu: true  # Enable GPU rendering (set to false to use CPU only)
 num_cpu_threads: 8  # CPU worker threads for Blender rendering and Python post-processing
 use_humans: true  # Enable human rendering mode
 save_blend_file: true  # Save .blend file for debugging
@@ -9,13 +9,13 @@ save_hdr_mp4: false
 save_rgb_reference: true
 save_rgb_event_input: true
 event_noise_enabled: true  # Inject salt-and-pepper DVS-like background noise
-event_noise_rate: 50000      # Salt-and-pepper noise rate in events per second (independent of event count)
+event_noise_rate: 20000      # Salt-and-pepper noise rate in events per second (independent of event count)
 
 # Human model and animation directories
 human_model_dir: 'data/human_models'
 human_anim_dir: 'data/human_animations/train'
 active_human_models: ['girl1_clean']  # Optional list of model basenames to include; empty means all
-active_human_anims: ['01_01_forward_jump']    # Optional list of animation basenames to include; empty means all
+active_human_anims: ['12_04_taichi']    # Optional list of animation basenames to include; empty means all
 clips_per_character: 1  # 0 means default to seq_range length; otherwise controls clips per active model.
 
 # HDR environment for lighting
@@ -24,12 +24,23 @@ hdr_dir: 'data/haven/hdris/'
 
 # Keep imported character transform untouched; randomization comes from camera motion.
 camera_target: [0.0, 0.0, 0.0]
+camera_target_mode: 'hips_bone'  # 'hips_bone' uses animated hips transform; 'model_initial' uses model center; 'fixed' uses camera_target
+camera_target_bone: 'Hips'  # Preferred bone name for camera_target_mode='hips_bone' (auto-fallback to hips/pelvis aliases)
+camera_target_frame: 0  # Frame used when camera_target_mode='model_initial' (default: animation start if available)
 camera_cube_extent: 40.0  # Half-side length of cube around origin (±25 in X and Y)
 camera_z_range: [5.0, 40.0]  # Z range for upper half of cube
 camera_pitch_z_reference: 8.0  # Z height where pitch = camera_pitch_base_deg (typically 90° for straight down)
 camera_pitch_base_deg: 90.0  # Pitch angle in degrees at z_reference; Y rot = 0, X rot = pitch
 camera_pitch_scale_per_unit_z: 2.0  # Change in pitch per unit of Z above/below reference (degrees/unit)
 camera_pitch_max_z_lookat_origin: 25.0  # At/above this Z, ignore pitch curve and point directly at camera_target
+camera_follow_enabled: true  # If true, camera follows behind hips motion using inertia
+camera_follow_rotation_only: true  # Keep camera fixed in place; only rotate to follow hips target
+camera_follow_edge_tracking: true  # Only pan/tilt when hips near image edge
+camera_follow_edge_margin: 0.05  # Normalized margin (0-0.5); larger means tracking starts earlier
+camera_follow_min_target_shift: 1.00  # Meters; ignore tiny hips jitter when deciding to pan/tilt
+camera_follow_distance: 8.0  # Distance kept behind motion direction
+camera_follow_height_offset: 2.0  # Vertical offset above hips target
+camera_follow_inertia: 0.95  # 0=no smoothing, closer to 1=slower smoother follow
 
 # Legacy fields (kept for compatibility; not used by current human import path)
 human_x_offset: [0, 0]
@@ -39,7 +50,7 @@ human_z_rotation: [0, 0]
 # Animation settings
 use_cycles: True
 animation_mode: 'linear'
-duration: 10.0  # Config duration in seconds (fallback or cap)
+duration: 2.0  # Config duration in seconds (fallback or cap)
 clamp_duration_to_animation: true  # When true, render min(config duration, animation length). When false, always render full animation.
 trim_initial_rgb_frames: 3  # Skip initial N frames (e.g., T-pose settling); still renders full duration but exports frame_N onward
 event_image_fps: 300 # FPS for event simulation
