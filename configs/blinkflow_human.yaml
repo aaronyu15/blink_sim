@@ -1,9 +1,9 @@
 image_width: 320
 image_height: 320
 use_gpu: true  # Enable GPU rendering (set to false to use CPU only)
-num_cpu_threads: 8  # CPU worker threads for Blender rendering and Python post-processing
+num_cpu_threads: 32 # CPU worker threads for Blender rendering and Python post-processing
 use_humans: true  # Enable human rendering mode
-save_blend_file: true  # Save .blend file for debugging
+save_blend_file: false  # Save .blend file for debugging
 save_hdr: false
 save_hdr_mp4: false
 save_rgb_reference: true
@@ -14,12 +14,17 @@ event_noise_rate: 20000      # Salt-and-pepper noise rate in events per second (
 # Human model and animation directories
 human_model_dir: 'data/human_models'
 human_anim_dir: 'data/human_animations/train'
-active_human_models: ['girl1_clean']  # Optional list of model basenames to include; empty means all
-active_human_anims: ['12_04_taichi']    # Optional list of animation basenames to include; empty means all
-clips_per_character: 1  # 0 means default to seq_range length; otherwise controls clips per active model.
+active_human_models: []  # Optional list of model basenames to include; empty means all
+active_human_anims: []    # Optional list of animation basenames to include; empty means all
+clips_per_character: 24 # 0 means default to seq_range length; otherwise controls clips per active model.
 
 # HDR environment for lighting
 hdr_dir: 'data/haven/hdris/'
+use_solid_background: true
+solid_background_color: [0.5, 0.5, 0.5]
+randomize_solid_background: true
+solid_background_gray_range: [0.2, 0.8]
+solid_background_strength: 1.0
 
 
 # Keep imported character transform untouched; randomization comes from camera motion.
@@ -36,11 +41,11 @@ camera_pitch_max_z_lookat_origin: 25.0  # At/above this Z, ignore pitch curve an
 camera_follow_enabled: true  # If true, camera follows behind hips motion using inertia
 camera_follow_rotation_only: true  # Keep camera fixed in place; only rotate to follow hips target
 camera_follow_edge_tracking: true  # Only pan/tilt when hips near image edge
-camera_follow_edge_margin: 0.05  # Normalized margin (0-0.5); larger means tracking starts earlier
-camera_follow_min_target_shift: 1.00  # Meters; ignore tiny hips jitter when deciding to pan/tilt
+camera_follow_edge_margin: 0.25  # Normalized margin (0-0.5); larger means tracking starts earlier
+camera_follow_min_target_shift: 0.30  # Meters; ignore tiny hips jitter when deciding to pan/tilt
 camera_follow_distance: 8.0  # Distance kept behind motion direction
 camera_follow_height_offset: 2.0  # Vertical offset above hips target
-camera_follow_inertia: 0.95  # 0=no smoothing, closer to 1=slower smoother follow
+camera_follow_inertia: 0.45  # 0=no smoothing, closer to 1=slower smoother follow
 
 # Legacy fields (kept for compatibility; not used by current human import path)
 human_x_offset: [0, 0]
@@ -50,7 +55,7 @@ human_z_rotation: [0, 0]
 # Animation settings
 use_cycles: True
 animation_mode: 'linear'
-duration: 2.0  # Config duration in seconds (fallback or cap)
+duration: 10.0  # Config duration in seconds (fallback or cap)
 clamp_duration_to_animation: true  # When true, render min(config duration, animation length). When false, always render full animation.
 trim_initial_rgb_frames: 3  # Skip initial N frames (e.g., T-pose settling); still renders full duration but exports frame_N onward
 event_image_fps: 300 # FPS for event simulation

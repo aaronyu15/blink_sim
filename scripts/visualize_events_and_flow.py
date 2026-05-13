@@ -19,11 +19,13 @@ import argparse
 import os
 import sys
 
-import cv2
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.widgets import Slider
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from src.flow_viz import flow_to_image
 
 
 def load_event_stream(sample_dir):
@@ -64,24 +66,9 @@ def load_flow_data(sample_dir):
     return forward_flow, frame_event_start, frame_event_end
 
 
-def flow_to_hsv_rgb(flow):
-    h, w = flow.shape[:2]
-    hsv = np.zeros((h, w, 3), dtype=np.uint8)
-
-    mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
-    ang = np.arctan2(flow[..., 1], flow[..., 0])
-
-    mag_max = np.max(mag)
-    if mag_max > 0:
-        val = (255.0 * mag / mag_max).astype(np.uint8)
-    else:
-        val = np.zeros_like(mag, dtype=np.uint8)
-
-    hsv[..., 0] = ((ang + np.pi) / (2 * np.pi) * 180.0).astype(np.uint8)
-    hsv[..., 1] = 255
-    hsv[..., 2] = val
-
-    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+def flow_to_middlebury_rgb(flow):
+    # Use shared Middlebury color wheel visualization.
+    return flow_to_image(flow)
 
 
 def build_binary_events_image(
@@ -174,7 +161,7 @@ def main():
 
         evt_vis = build_binary_events_image(t_us, y, x, p, t0_us, t1_us, h, w)
 
-        flow_vis = flow_to_hsv_rgb(forward_flow[frame_idx])
+        flow_vis = flow_to_middlebury_rgb(forward_flow[frame_idx])
 
         ax_evt.imshow(evt_vis, cmap="gray", vmin=0, vmax=1)
         ax_evt.set_title(

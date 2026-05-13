@@ -1012,6 +1012,46 @@ def setup_camera_intrinsic():
 
 def setup_envmap():
     global config
+    use_solid_background = config.get('use_solid_background', False)
+    if use_solid_background:
+        # Configure Blender world nodes for a flat monochrome background.
+        randomize_solid_background = config.get('randomize_solid_background', False)
+        if randomize_solid_background:
+            gray_min, gray_max = config.get('solid_background_gray_range', [0.2, 0.8])
+            gray = random.uniform(float(gray_min), float(gray_max))
+            color = [gray, gray, gray]
+        else:
+            color = config.get('solid_background_color', [0.5, 0.5, 0.5])
+        strength = float(config.get('solid_background_strength', 1.0))
+
+        # Ensure world exists and uses nodes.
+        if bpy.context.scene.world is None:
+            bpy.context.scene.world = bpy.data.worlds.new("World")
+        world = bpy.context.scene.world
+        world.use_nodes = True
+
+        nodes = world.node_tree.nodes
+        links = world.node_tree.links
+
+        bg_node = nodes.get('Background')
+        output_node = nodes.get('World Output')
+        if bg_node is None:
+            bg_node = nodes.new(type='ShaderNodeBackground')
+        if output_node is None:
+            output_node = nodes.new(type='ShaderNodeOutputWorld')
+
+        bg_node.inputs['Color'].default_value = (float(color[0]), float(color[1]), float(color[2]), 1.0)
+        bg_node.inputs['Strength'].default_value = strength
+
+        has_link = False
+        for link in links:
+            if link.from_node == bg_node and link.to_node == output_node:
+                has_link = True
+                break
+        if not has_link:
+            links.new(bg_node.outputs['Background'], output_node.inputs['Surface'])
+        return
+
     hdr_dir = config['hdr_dir']
     hdr_folders = [f for f in os.listdir(hdr_dir) if os.path.isdir(os.path.join(hdr_dir, f))]
     hdr_folder = random.choice(hdr_folders)
