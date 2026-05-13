@@ -2,6 +2,7 @@ import os
 import h5py
 import glob
 import argparse
+import shutil
 import numpy as np
 from matplotlib import pyplot as plt
 import sys
@@ -324,7 +325,7 @@ def flow_consistency(forward, backward, device="cpu"):
 
 
 
-def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True):
+def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True, rgb_fps=30, event_fps=300, trim_initial_frames=0):
     num = len(glob.glob(f"{output_dir}/hdf5/rgb_and_flow/*.hdf5"))
     assert nFrames <= num
     # os.system(f'mkdir -p {output_dir}/left_final')
@@ -332,7 +333,23 @@ def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True
         os.system(f'mkdir -p {output_dir}/hdr')
     os.system(f'mkdir -p {output_dir}/forward_flow')
 
+    # After trimming, we have nFrames - trim_initial_frames frames to export
+    # Flow requires consecutive frames, so flow_count = exported_frame_count - 1
+    exported_frames = max(1, nFrames - trim_initial_frames)
+    flow_count = max(0, exported_frames - 1)
+    flow_forward = np.zeros((flow_count, height, width, 2), dtype=np.float32)
+    flow_backward = np.zeros((flow_count, height, width, 2), dtype=np.float32)
+    flow_valid = np.zeros((flow_count, height, width, 1), dtype=np.float32)
+    frame_t_us = np.zeros((flow_count,), dtype=np.uint64)
+    frame_event_start = np.zeros((flow_count,), dtype=np.uint64)
+    frame_event_end = np.zeros((flow_count,), dtype=np.uint64)
+
     for i in range(nFrames):
+        # Skip first trim_initial_frames frames
+        if i < trim_initial_frames:
+            continue
+        
+        export_idx = i - trim_initial_frames  # Index in exported output
         hdf5_path = f"{output_dir}/hdf5/rgb_and_flow/{i}.hdf5"
         data = h5py.File(hdf5_path, 'r')
         forward = data['forward_flow'][:] # (h, w, 2)
@@ -350,7 +367,28 @@ def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True
             valid = flow_consistency(forward, backward)
 
             flow_image = np.concatenate([forward, valid], axis=2)
-            np.save(f'{output_dir}/forward_flow/{i:06d}.npy', flow_image)
+            np.save(f'{output_dir}/forward_flow/{export_idx:06d}.npy', flow_image)
+
+            flow_forward[export_idx] = forward.astype(np.float32)
+            flow_backward[export_idx] = backward.astype(np.float32)
+            flow_valid[export_idx] = valid.astype(np.float32)
+
+            # Timestamp/interval metadata aligned to the exported frame timeline (after trimming).
+            frame_t_us[export_idx] = int(round((export_idx / float(rgb_fps)) * 1e6))
+            frame_event_start[export_idx] = int(round(export_idx * float(event_fps) / float(rgb_fps)))
+            frame_event_end[export_idx] = int(round((export_idx + 1) * float(event_fps) / float(rgb_fps)))
+
+    with h5py.File(f'{output_dir}/flow.h5', 'w') as hf:
+        hf.create_dataset('flow/forward', data=flow_forward, compression='gzip', compression_opts=4)
+        hf.create_dataset('flow/backward', data=flow_backward, compression='gzip', compression_opts=4)
+        hf.create_dataset('flow/valid', data=flow_valid, compression='gzip', compression_opts=4)
+        hf.create_dataset('flow/frame_t_us', data=frame_t_us, compression='gzip', compression_opts=4)
+        hf.create_dataset('flow/frame_event_start', data=frame_event_start, compression='gzip', compression_opts=4)
+        hf.create_dataset('flow/frame_event_end', data=frame_event_end, compression='gzip', compression_opts=4)
+
+    forward_flow_dir = f'{output_dir}/forward_flow'
+    if os.path.isdir(forward_flow_dir):
+        shutil.rmtree(forward_flow_dir)
 
 
 def cli():

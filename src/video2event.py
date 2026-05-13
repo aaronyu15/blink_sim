@@ -1,8 +1,8 @@
 import os
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_MAX_THREADS"]="1"
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
 import pickle
 from tracemalloc import start
 import cv2
@@ -30,14 +30,19 @@ def _ms_to_idx(ts_us):
     l = np.searchsorted(ts_ms, list(range(0, max_t)))
     return l
 
-def _make_events_from_voltmeter(nFrames, input_dir, interpTimes):
+def _make_events_from_voltmeter(nFrames, input_dir, interpTimes, trim_initial_frames=0):
     events_list = []
     emulator = voltmeter()
 
     for i in range(nFrames):
+        # Skip first trim_initial_frames frames
+        if i < trim_initial_frames:
+            continue
+        
+        exported_idx = i - trim_initial_frames  # Index in exported sequence
         frame = h5py.File(f'{input_dir}/{i}.hdf5', 'r')['hdr'][:] * 255
         frame = 0.3*frame[...,0] + 0.59*frame[...,1] + 0.11*frame[...,2]
-        newEvents = emulator.generate_events(frame, interpTimes[i])
+        newEvents = emulator.generate_events(frame, interpTimes[exported_idx])
         if newEvents is not None and newEvents.shape[0] > 0:
             events_list.append(newEvents)
     try:
@@ -83,23 +88,39 @@ def _make_events_from_esim(nFrames, input_dir, interpTimes):
 
 
 
-def _inject_noise(events_np, size, nFrames, fps, noise_enabled=False, noise_rate=0.02):
+def _inject_noise(events_np, size, nFrames, fps, noise_enabled=False, noise_rate=0.02, time_offset=0.0):
+    """
+    Inject salt-and-pepper noise into events.
+    
+    Args:
+        events_np: Event array (N, 4) with [t, y, x, p]
+        size: (height, width) of sensor
+        nFrames: Number of frames in sequence (after trimming)
+        fps: Frames per second
+        noise_enabled: Whether to enable noise injection
+        noise_rate: Salt-and-pepper noise rate in events per second (independent of event count)
+        time_offset: Time offset (in seconds) for noise timestamps
+    
+    Returns:
+        Event array with injected salt-and-pepper noise
+    """
     if not noise_enabled or noise_rate <= 0:
         return events_np
 
     h, w = size
     duration = nFrames / float(fps)
-    base_count = events_np.shape[0]
-    # Fallback if no events: approximate count from duration*fps (one event per frame)
-    approx_count = base_count if base_count > 0 else nFrames
-    noise_n = max(1, int(approx_count * noise_rate))
+    
+    # Generate salt-and-pepper noise at a fixed rate (events per second)
+    # This is independent of the actual event count
+    noise_n = max(1, int(duration * float(noise_rate)))
 
-    t_noise = np.random.uniform(0.0, duration, size=noise_n)
+    t_noise = np.random.uniform(time_offset, time_offset + duration, size=noise_n)
     x_noise = np.random.randint(0, w, size=noise_n)
     y_noise = np.random.randint(0, h, size=noise_n)
     p_noise = np.random.randint(0, 2, size=noise_n)
 
     noise_events = np.stack([t_noise, y_noise, x_noise, p_noise], axis=1)
+    base_count = events_np.shape[0]
     combined = np.concatenate([events_np, noise_events], axis=0) if base_count > 0 else noise_events
     # Sort by timestamp to keep temporal order
     combined = combined[combined[:, 0].argsort()]
@@ -107,20 +128,23 @@ def _inject_noise(events_np, size, nFrames, fps, noise_enabled=False, noise_rate
 
 
 def make_events(output_dir, size, nFrames, fps=300, save_h5=False, save_event_voxel=False, delta_ms=100, num_bins=15,
-                noise_enabled=False, noise_rate=0.02):
+                noise_enabled=False, noise_rate=0.02, trim_initial_frames=0):
     # input_dir = f"{output_dir}/frames"
     input_dir = f"{output_dir}/hdf5/event_input/"
 
-    interpTimes = np.linspace(0, nFrames/fps, nFrames, True).tolist()
+    # After trimming, compute timing for exported frames
+    exported_frames = max(1, nFrames - trim_initial_frames)
+    start_time = trim_initial_frames / fps  # Time offset for first exported frame
+    interpTimes = np.linspace(start_time, start_time + exported_frames/fps, exported_frames, True).tolist()
 
-    print(f'*** Stage 3/3: emulating DVS events from {nFrames} frames')
-    events_np, valid = _make_events_from_voltmeter(nFrames, input_dir, interpTimes)
+    print(f'*** Stage 3/3: emulating DVS events from {nFrames} frames (exporting {exported_frames} after trim)')
+    events_np, valid = _make_events_from_voltmeter(nFrames, input_dir, interpTimes, trim_initial_frames=trim_initial_frames)
     if not valid:
         if save_h5:
             os.system(f'mkdir -p {output_dir}/events_NOT_VALID')
             return 0
 
-    events_np = _inject_noise(events_np, size, nFrames, fps, noise_enabled=noise_enabled, noise_rate=noise_rate)
+    events_np = _inject_noise(events_np, size, exported_frames, fps, noise_enabled=noise_enabled, noise_rate=noise_rate, time_offset=start_time)
     # events_np = _make_events_from_v2e(nFrames, input_dir, interpTimes)
     # events_np = _make_events_from_esim(nFrames, input_dir, interpTimes)
     # import ipdb; ipdb.set_trace()
@@ -128,10 +152,8 @@ def make_events(output_dir, size, nFrames, fps=300, save_h5=False, save_event_vo
     ts = events_np[:,0]*1e6
     ms_to_idx = _ms_to_idx(ts)
     if save_h5:
-        # import ipdb; ipdb.set_trace()
-        # np.save(f'{output_dir}/events.npy', events_np)
-        os.system(f'mkdir -p {output_dir}/events_left')
-        hf = h5py.File(f'{output_dir}/events_left/events.h5', 'w')
+        # Save sparse event stream at sample root for downstream consumers.
+        hf = h5py.File(f'{output_dir}/events.h5', 'w')
         events_np[events_np[:,3]<0, 3] = 0
         hf.create_dataset('events/t', data=ts.astype('u8'), compression="gzip", compression_opts=9)
         hf.create_dataset('events/y', data=events_np[:,1].astype('u2'), compression="gzip", compression_opts=9)
