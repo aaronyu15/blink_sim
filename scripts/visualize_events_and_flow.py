@@ -22,6 +22,7 @@ import sys
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 from matplotlib.widgets import Slider
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -58,12 +59,14 @@ def load_flow_data(sample_dir):
             forward_flow = f["flow/forward"][:]                 # [N, H, W, 2]
             frame_event_start = f["flow/frame_event_start"][:]  # [N]
             frame_event_end = f["flow/frame_event_end"][:]      # [N]
+            event_t_offset_us = int(f["flow/event_t_offset_us"][()]) if "flow/event_t_offset_us" in f else None
         else:
             forward_flow = f["forward_flow"][:]            # [N, H, W, 2]
             frame_event_start = f["frame_event_start"][:]  # [N]
             frame_event_end = f["frame_event_end"][:]      # [N]
+            event_t_offset_us = int(f["event_t_offset_us"][()]) if "event_t_offset_us" in f else None
 
-    return forward_flow, frame_event_start, frame_event_end
+    return forward_flow, frame_event_start, frame_event_end, event_t_offset_us
 
 
 def flow_to_middlebury_rgb(flow):
@@ -102,16 +105,53 @@ def event_idx_to_time_us(event_idx, event_fps):
     return int(round((float(event_idx) / float(event_fps)) * 1e6))
 
 
+def infer_event_time_offset_us(sample_dir, event_fps):
+    """Infer absolute event time offset introduced by initial trim."""
+    # Preferred: explicit offset if present in events file
+    events_path = os.path.join(sample_dir, "events.h5")
+    if os.path.exists(events_path):
+        try:
+            with h5py.File(events_path, "r") as f:
+                if "t_offset_us" in f:
+                    return int(f["t_offset_us"][()])
+        except Exception:
+            pass
+
+    print("Could not find explicit event time offset in events.h5; attempting to infer from config...")
+    # Fallback: derive from per-sample config
+    cfg_path = os.path.join(sample_dir, "config_job.yaml")
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            trim_rgb = int(cfg.get("trim_initial_rgb_frames", 0))
+            rgb_fps = float(cfg.get("rgb_image_fps", 30.0))
+            evt_fps = float(cfg.get("event_image_fps", event_fps))
+            trim_evt = int(round(trim_rgb * evt_fps / rgb_fps))
+            return int(round((trim_evt / evt_fps) * 1e6))
+        except Exception:
+            pass
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize event frame vs flow with slider")
     parser.add_argument("sample_dir", type=str, help="Path to one sample directory")
     parser.add_argument("--event-fps", type=float, default=300.0, help="Event input FPS used in simulation")
     parser.add_argument(
+        "--event-time-offset-us",
+        type=int,
+        default=None,
+        help="Optional absolute timestamp offset added to frame_event_start/end time conversion. "
+             "If omitted, inferred from sample metadata.",
+    )
+    parser.add_argument(
         "--event-index-offset",
         type=int,
         default=None,
         help="Optional manual offset subtracted from frame_event_start/end before time conversion. "
-             "If omitted, uses min(frame_event_start) automatically.",
+             "If omitted, uses 0 (recommended for new flow.h5 metadata).",
     )
     args = parser.parse_args()
 
@@ -124,7 +164,7 @@ def main():
     t_us, y, x, p = load_event_stream(sample_dir)
 
     print("Loading flow and frame-event metadata from flow.h5 ...")
-    forward_flow, frame_event_start, frame_event_end = load_flow_data(sample_dir)
+    forward_flow, frame_event_start, frame_event_end, event_t_offset_from_flow = load_flow_data(sample_dir)
 
     n = forward_flow.shape[0]
     h, w = forward_flow.shape[1], forward_flow.shape[2]
@@ -134,14 +174,20 @@ def main():
     if len(t_us) > 0:
         print(f"Event time range: {t_us[0]}us .. {t_us[-1]}us")
 
-    # In this pipeline, frame_event_start/end may include an initial trim offset
-    # (e.g., 30 event frames) while event timestamps in events.h5 start at t=0.
-    # Remove that offset before converting event-frame indices to times.
     if args.event_index_offset is None:
-        event_index_offset = int(np.min(frame_event_start))
+        event_index_offset = 0
     else:
         event_index_offset = int(args.event_index_offset)
     print(f"Using event index offset: {event_index_offset}")
+
+    if args.event_time_offset_us is None:
+        if event_t_offset_from_flow is not None:
+            event_time_offset_us = int(event_t_offset_from_flow)
+        else:
+            event_time_offset_us = infer_event_time_offset_us(sample_dir, args.event_fps)
+    else:
+        event_time_offset_us = int(args.event_time_offset_us)
+    print(f"Using event time offset (us): {event_time_offset_us}")
 
     fig, (ax_evt, ax_flow) = plt.subplots(1, 2, figsize=(14, 6))
     plt.subplots_adjust(bottom=0.20)
@@ -156,8 +202,8 @@ def main():
         evt_start_idx_aligned = max(0, evt_start_idx - event_index_offset)
         evt_end_idx_aligned = max(0, evt_end_idx - event_index_offset)
 
-        t0_us = event_idx_to_time_us(evt_start_idx_aligned, args.event_fps)
-        t1_us = event_idx_to_time_us(evt_end_idx_aligned, args.event_fps)
+        t0_us = event_time_offset_us + event_idx_to_time_us(evt_start_idx_aligned, args.event_fps)
+        t1_us = event_time_offset_us + event_idx_to_time_us(evt_end_idx_aligned, args.event_fps)
 
         evt_vis = build_binary_events_image(t_us, y, x, p, t0_us, t1_us, h, w)
 

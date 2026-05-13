@@ -343,6 +343,9 @@ def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True
     frame_t_us = np.zeros((flow_count,), dtype=np.uint64)
     frame_event_start = np.zeros((flow_count,), dtype=np.uint64)
     frame_event_end = np.zeros((flow_count,), dtype=np.uint64)
+    # Absolute event timeline offset caused by trimming initial RGB frames.
+    trim_initial_event_frames = int(round(trim_initial_frames * float(event_fps) / float(rgb_fps)))
+    event_t_offset_us = int(round((trim_initial_event_frames / float(event_fps)) * 1e6))
 
     for i in range(nFrames):
         # Skip first trim_initial_frames frames
@@ -385,6 +388,8 @@ def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True
         hf.create_dataset('flow/frame_t_us', data=frame_t_us, compression='gzip', compression_opts=4)
         hf.create_dataset('flow/frame_event_start', data=frame_event_start, compression='gzip', compression_opts=4)
         hf.create_dataset('flow/frame_event_end', data=frame_event_end, compression='gzip', compression_opts=4)
+        hf.create_dataset('flow/event_t_offset_us', data=np.array(event_t_offset_us, dtype=np.uint64))
+        hf.create_dataset('flow/event_frame_offset', data=np.array(trim_initial_event_frames, dtype=np.uint64))
 
     forward_flow_dir = f'{output_dir}/forward_flow'
     if os.path.isdir(forward_flow_dir):
