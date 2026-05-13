@@ -1,21 +1,17 @@
 # python main.py
 
 import os
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_MAX_THREADS"]="1"
-from numpy import require
 import yaml
-import numpy as np
 import random
 import glob
 from pathlib import Path
 from collections import defaultdict
-from src.utils import clean_tmp_files, check_blender_result, clean_unfinished
-from src.blender.launcher import blender_generate_images_v2
-from src.blender.visHdf5Files import parse_hdf5_to_flow_dataset, parse_hdf5_to_img_video3
-from src.video2event import make_events
+
+
+def _apply_runtime_thread_settings(config):
+    num_cpu_threads = int(config.get('num_cpu_threads', 1))
+    for key in ["MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_MAX_THREADS"]:
+        os.environ[key] = str(num_cpu_threads)
 
 def _filter_by_names(paths, allowed_names):
     if not allowed_names:
@@ -66,10 +62,17 @@ def build_jobs(config):
 
 
 def main(config):
+    from src.utils import clean_tmp_files, check_blender_result, clean_unfinished
+    from src.blender.launcher import blender_generate_images_v2
+    from src.blender.visHdf5Files import parse_hdf5_to_flow_dataset, parse_hdf5_to_img_video3
+    from src.video2event import make_events
+
     rgb_fps = config['rgb_image_fps']
     event_fps = config['event_image_fps']
     duration = config['duration']
-    duration_from_anim = config.get('duration_from_animation', False)
+    clamp_to_anim = config.get('clamp_duration_to_animation', True)
+    trim_initial_frames = config.get('trim_initial_rgb_frames', 0)
+    trim_initial_event_frames = int(round(trim_initial_frames * float(event_fps) / float(rgb_fps)))
     base_rgb_frames = int(round(duration * rgb_fps))
     base_event_frames = int(round(duration * event_fps))
     train_ratio = config['train_split_ratio']
@@ -111,22 +114,24 @@ def main(config):
         evt_h5_dir = os.path.join(output_dir, 'hdf5', 'event_input')
         rgb_found = len(os.listdir(rgb_h5_dir)) if os.path.exists(rgb_h5_dir) else 0
         evt_found = len(os.listdir(evt_h5_dir)) if os.path.exists(evt_h5_dir) else 0
-        if duration_from_anim:
+        if not clamp_to_anim:
+            # Full animation was rendered; use actual frame count
             if rgb_found == 0 or evt_found == 0:
-                print(f"duration_from_animation enabled but could not count frames (rgb: {rgb_found}, event: {evt_found}). Falling back to config duration.")
+                print(f"Full animation mode but could not count frames (rgb: {rgb_found}, event: {evt_found}). Falling back to config duration.")
             else:
                 rgb_frames = rgb_found
                 event_frames = evt_found
                 capped_duration = rgb_frames / float(rgb_fps)
-                print(f"Derived duration from animation output (capped by config): {rgb_frames} rgb frames @ {rgb_fps} fps -> {capped_duration:.3f}s ")
+                print(f"Using full animation output: {rgb_frames} rgb frames @ {rgb_fps} fps -> {capped_duration:.3f}s")
         else:
+            # Clamped mode; use whichever is shorter
             if rgb_found == 0 or evt_found == 0:
-                print(f"duration_from_animation enabled but could not count frames (rgb: {rgb_found}, event: {evt_found}). Falling back to config duration.")
+                print(f"Clamp mode but could not count frames (rgb: {rgb_found}, event: {evt_found}). Falling back to config duration.")
             else:
                 rgb_frames = min(rgb_found, base_rgb_frames)
                 event_frames = min(evt_found, base_event_frames)
                 capped_duration = rgb_frames / float(rgb_fps)
-                print(f"Derived duration from animation output (capped by config): {rgb_frames} rgb frames @ {rgb_fps} fps -> {capped_duration:.3f}s (max {duration:.3f}s)")
+                print(f"Using clamped animation output: {rgb_frames} rgb frames @ {rgb_fps} fps -> {capped_duration:.3f}s (max config {duration:.3f}s)")
 
         parse_hdf5_to_img_video3(
             output_dir,
@@ -140,7 +145,10 @@ def main(config):
             rgb_frames,
             config['image_width'],
             config['image_height'],
-            save_hdr=config.get('save_hdr', False)
+            save_hdr=config.get('save_hdr', False),
+            rgb_fps=rgb_fps,
+            event_fps=event_fps,
+            trim_initial_frames=trim_initial_frames,
         )
         evt_np = make_events(
             output_dir,
@@ -151,7 +159,8 @@ def main(config):
             False,
             num_bins=15,
             noise_enabled=config.get('event_noise_enabled', False),
-            noise_rate=config.get('event_noise_rate', 0.02),
+            noise_rate=config.get('event_noise_rate', 1000),  # events per second
+            trim_initial_frames=trim_initial_event_frames,
         )
         clean_tmp_files(output_dir)
 
@@ -177,4 +186,5 @@ if __name__ == '__main__':
         config['seq_range'] = [args.seq_range[0], args.seq_range[1]]
     print('seq_range:', config['seq_range'])
 
+    _apply_runtime_thread_settings(config)
     main(config)

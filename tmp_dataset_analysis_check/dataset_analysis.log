@@ -1,0 +1,14 @@
+Scanning dataset at: outputs/hflow320/train
+Found 540 sample directories
+
+Pass 1: Computing data ranges...
+
+Initializing histograms based on data range...
+  Magnitude range: [0.00, 390.10]
+  U component range: [-115.57, 257.12]
+  V component range: [-187.00, 294.80]
+  Bins per histogram: 1000
+
+Pass 2: Building histograms from all pixels...
+
+Pass 3: Analyzing with event-based valid masks...

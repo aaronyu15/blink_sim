@@ -1,9 +1,9 @@
 import blenderproc as bproc
 import os
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_MAX_THREADS"]="1"
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
 from skspatial.objects import Line, Sphere
 import argparse, bpy, math, pickle, cv2, os, sys, shutil
 import numpy as np
@@ -76,6 +76,66 @@ def sample_pose(obj: bproc.types.MeshObject):
 
 
 
+def euler_from_height_dependent_pitch(cam_position, target, z_reference=8.0, base_pitch_deg=90.0, 
+                                       pitch_scale=2.0, up=None):
+    """
+    Compute camera euler angles with height-dependent pitch towards target.
+    
+    Camera aims towards target in XY plane, with pitch depending on Z height.
+    - At Z = z_reference: pitch = base_pitch_deg (typically 90° for straight down)
+    - Above z_reference: pitch increases (looking more down)
+    - Below z_reference: pitch decreases (looking more horizontally)
+    
+    Args:
+        cam_position: Camera [x, y, z]
+        target: Target point [x, y, z]
+        z_reference: Z value where pitch = base_pitch_deg (default 8.0)
+        base_pitch_deg: Pitch angle at z_reference in degrees (default 90.0 = straight down)
+        pitch_scale: How much pitch changes per unit of Z, in degrees/unit (default 2.0)
+        up: Up vector for camera (default [0, 0, 1] for Blender)
+    
+    Returns:
+        Euler angles [X, Y, Z] in radians for Blender
+    """
+    if up is None:
+        up = np.array([0, 0, 1])
+    else:
+        up = np.array(up)
+    
+    cam_pos = np.array(cam_position)
+    target_pos = np.array(target)
+    
+    # Height-dependent pitch: compute pitch angle based on camera Z position
+    cam_z = cam_pos[2]
+    pitch_deg = base_pitch_deg + pitch_scale * (cam_z - z_reference)
+    pitch_rad = np.radians(pitch_deg)
+    
+    # Compute horizontal direction from camera towards target in XY plane
+    horiz_dir = target_pos[:2] - cam_pos[:2]
+    horiz_dist = np.linalg.norm(horiz_dir)
+    
+    if horiz_dist > 0.001:
+        horiz_dir = horiz_dir / horiz_dist
+    else:
+        # If camera is directly above target in XY, default to looking in +Y direction
+        horiz_dir = np.array([0, 1])
+    
+    # Create an effective look-at point by combining:
+    # - Horizontal aiming (towards target's XY projection)
+    # - Height-dependent pitch
+    # This look-at point is roughly where the camera should be aiming
+    look_ahead_dist = 50.0  # How far ahead to compute the look-at point
+    forward_horiz = horiz_dir * look_ahead_dist
+    # Keep vertical component always downward in this mode.
+    # This prevents pitch values above 90 deg from flipping the camera to look upward.
+    forward_vert = -look_ahead_dist * abs(np.tan(pitch_rad))
+    
+    # Effective look-at point
+    effective_lookat = cam_pos + np.array([forward_horiz[0], forward_horiz[1], forward_vert])
+    
+    # Now use the standard euler_from_look_at to compute the rotation
+    return euler_from_look_at(cam_pos, effective_lookat, up)
+
 def euler_from_look_at(position, target, up):
     forward = np.subtract(target, position)
     forward = np.divide( forward, np.linalg.norm(forward) )
@@ -139,30 +199,8 @@ def load_human_fbx(model_path, animation_path=None):
             armature = obj
             break
     
-    # Randomize position within camera view
-    # Camera is at [0, 0, 1.5] looking forward
-    # X: random horizontal offset (-1 to 1 meters)
-    # Y: random distance (2.5 to 4 meters from camera)
-    # Z: place feet on/near ground (0.1m), so body extends upward
-    x_offset = random.uniform(config['human_x_offset'][0], config['human_x_offset'][1])
-    distance = random.uniform(config['human_distance'][0], config['human_distance'][1])
-    z_offset = random.uniform(config['human_z_offset'][0], config['human_z_offset'][1])
-    position = [x_offset, distance, z_offset]  # Feet near ground level
-    
-    # Rotation: 90 degrees around X axis to stand upright
-    # Mixamo models are exported lying down, need to rotate them up
-    z_rotation = random.uniform(config['human_z_rotation'][0], config['human_z_rotation'][1])
-    rotation = [np.pi/2, 0, z_rotation]
-    
-    # Scale: 0.01 to convert from cm (Mixamo units) to meters
-    scale = [0.01, 0.01, 0.01]
-    
-    # Apply transformations to the armature (if it exists) to avoid distortion
-    # This ensures the entire rig transforms correctly
-    if armature:
-        armature.location = position
-        armature.rotation_euler = rotation
-        armature.scale = scale
+    # Keep imported character exactly as authored in FBX.
+    # Do not modify location/rotation/scale at import time.
     
     # Load and apply animation if provided
     animation_action = None
@@ -212,27 +250,8 @@ def load_human_fbx(model_path, animation_path=None):
         for obj in anim_objs:
             bpy.data.objects.remove(obj, do_unlink=True)
     
-    # Adjust facing and start position for locomotion animations so actors traverse the camera view
-    if animation_path and locomotion and armature:
-        # Camera at origin looking +Y. Choose a path that crosses the view near center, entering from a side.
-        y_cross = random.uniform(1.2, 3.0)          # depth where path crosses the view
-        x_cross = random.uniform(-0.4, 0.4)         # horizontal crossing near center
-        span = random.uniform(1.0, 2.0)             # horizontal travel distance
-        direction = random.choice([-1.0, 1.0])      # -1: right->left, +1: left->right
-
-        start_x = x_cross - direction * (span / 2.0)
-        end_x = x_cross + direction * (span / 2.0)
-        start_y = y_cross + random.uniform(0.5, 1.0)
-        end_y = y_cross + random.uniform(0.8, 1.5)
-
-        heading = math.atan2(end_x - start_x, end_y - start_y)
-        jitter = random.uniform(-0.12, 0.12)  
-        armature.rotation_euler[2] = heading + jitter
-
-        # Place start off-center so the actor enters the frame
-        armature.location[0] = start_x
-        armature.location[1] = start_y
-        # Record locomotion flag for downstream camera logic
+    # Record locomotion flag only; camera logic can use it if needed.
+    if animation_path and locomotion:
         config['last_is_locomotion'] = True
 
     # Wrap mesh objects in BlenderProc MeshObjects
@@ -255,11 +274,7 @@ def load_human_fbx(model_path, animation_path=None):
                     mat.blend_method = 'OPAQUE'
                     mat.shadow_method = 'OPAQUE'
             
-            # If no armature, apply transforms directly to mesh
-            if not armature:
-                bp_obj.set_location(position)
-                bp_obj.set_rotation_euler(rotation)
-                bp_obj.set_scale(scale)
+            # If no armature, keep mesh transform untouched as imported.
     
     return mesh_objs
 
@@ -514,15 +529,49 @@ def setup_fill_light(cam_position, look_at):
 
     cam_position = np.array(cam_position, dtype=float)
     look_at = np.array(look_at, dtype=float)
-    dir_flat = look_at - cam_position
-    dir_flat[2] = 0.0
-    norm = np.linalg.norm(dir_flat)
-    if norm < 1e-6:
-        dir_flat = np.array([0, 1, 0], dtype=float)
-    else:
-        dir_flat /= norm
+    mode = config.get('fill_light_position_mode', 'camera_offset')
 
-    pos = cam_position + dir_flat * distance + np.array([0, 0, height])
+    if mode == 'cube_random':
+        cube_extent = float(config.get('camera_cube_extent', 25.0))
+        full_cube_z = bool(config.get('fill_light_cube_full_z', True))
+        min_sep = float(config.get('fill_light_cube_min_separation', 3.0))
+        max_attempts = int(config.get('fill_light_cube_max_attempts', 30))
+
+        if full_cube_z:
+            z_min, z_max = -cube_extent, cube_extent
+        else:
+            z_cfg = config.get('camera_z_range', [5.0, 50.0])
+            z_min, z_max = float(z_cfg[0]), float(z_cfg[1])
+
+        pos = None
+        for _ in range(max_attempts):
+            candidate = np.array([
+                random.uniform(-cube_extent, cube_extent),
+                random.uniform(-cube_extent, cube_extent),
+                random.uniform(z_min, z_max),
+            ], dtype=float)
+            if np.linalg.norm(candidate - cam_position) >= min_sep:
+                pos = candidate
+                break
+
+        if pos is None:
+            # Fallback if constraints are too strict.
+            pos = np.array([
+                random.uniform(-cube_extent, cube_extent),
+                random.uniform(-cube_extent, cube_extent),
+                random.uniform(z_min, z_max),
+            ], dtype=float)
+    else:
+        dir_flat = look_at - cam_position
+        dir_flat[2] = 0.0
+        norm = np.linalg.norm(dir_flat)
+        if norm < 1e-6:
+            dir_flat = np.array([0, 1, 0], dtype=float)
+        else:
+            dir_flat /= norm
+
+        pos = cam_position + dir_flat * distance + np.array([0, 0, height])
+
     light = bproc.types.Light()
     light.set_type("AREA")
     light.set_location(pos)
@@ -868,8 +917,6 @@ def setup_human_env(mode):
     bpy.context.scene.camera.data.clip_start = 0.1
     bpy.context.scene.camera.data.clip_end = 100.0
     
-    # Fixed camera position
-    cam_position = [0, 0, 1.5]  # Camera at origin, 1.5m high
     up = [0, 0, 1]
     
     # Setup environment map for lighting
@@ -912,47 +959,67 @@ def setup_human_env(mode):
         anim_len_frames = config['anim_frame_length']
         fps = config.get('rgb_image_fps', 10)
         anim_sec = float(anim_len_frames) / float(fps)
-        if config.get('duration_from_animation', False):
-            new_dur = anim_sec
-            config['duration'] = new_dur
-        else:
-            cfg_dur = config.get('duration', anim_sec)
+        
+        # clamp_duration_to_animation: when True, render min(config_duration, animation_length)
+        # when False, render full animation regardless of config_duration
+        clamp_to_anim = config.get('clamp_duration_to_animation', True)
+        cfg_dur = config.get('duration', anim_sec)
+        
+        if clamp_to_anim:
+            # Clamp to whichever is shorter
             new_dur = min(cfg_dur, anim_sec)
             if abs(new_dur - cfg_dur) > 1e-6:
-                print(f"Clamping duration to animation length: anim {anim_sec:.3f}s < cfg {cfg_dur:.3f}s -> {new_dur:.3f}s")
-            config['duration'] = new_dur
-    else:
-        print("duration_from_animation requested but no animation frame length found; falling back to config duration")
-
-    
-    # Camera targeting: optionally keep camera fixed for locomotion. For side-to-side
-    # traversals, rely on a static look-at to avoid re-centering on the actor.
-    locomotion_active = config.get('last_is_locomotion', False)
-    lock_on_human = config.get('camera_lock_on_human', True)
-    default_look_at = config.get('camera_default_look_at', [0, 2.5, 1.2])
-
-    if lock_on_human and not locomotion_active and human_objs:
-        # Get the armature position (stored during load_human_fbx)
-        human_armature = None
-        for obj in bpy.data.objects:
-            if obj.type == 'ARMATURE':
-                human_armature = obj
-                break
-        
-        if human_armature:
-            human_x = human_armature.location[0]
-            human_y = human_armature.location[1] 
-            human_z = human_armature.location[2] + 1.2  # Look at chest height (1.2m above feet)
-            look_at = [human_x, human_y, human_z]
+                print(f"Clamping duration to animation length: anim {anim_sec:.3f}s, cfg {cfg_dur:.3f}s -> {new_dur:.3f}s")
         else:
-            look_at = default_look_at
+            # Use full animation length
+            new_dur = anim_sec
+            if abs(new_dur - cfg_dur) > 1e-6:
+                print(f"Using full animation length: anim {anim_sec:.3f}s (ignoring config {cfg_dur:.3f}s)")
+        
+        config['duration'] = new_dur
     else:
-        look_at = default_look_at
+        print("Animation frame length not found; using config duration")
+
     
-    # Compute camera rotation to look at the human
-    cam_euler = euler_from_look_at(cam_position, look_at, up)
-    # Compute camera rotation to look at the human
-    cam_euler = euler_from_look_at(cam_position, look_at, up)
+    # Camera motion controls all randomization; model stays untouched.
+    look_at = config.get('camera_target', [0.0, 0.0, 0.0])
+    camera_cube_extent = config.get('camera_cube_extent', 25.0)  # Half-side length of cube
+    camera_z_range = config.get('camera_z_range', [5.0, 50.0])   # Z range for upper half
+
+    # Sample random position on upper half of a cube around origin.
+    # The cube extends ±camera_cube_extent in X and Y.
+    # Z is sampled from camera_z_range (typically positive for "upper half").
+    
+    cam_x = random.uniform(-camera_cube_extent, camera_cube_extent)
+    cam_y = random.uniform(-camera_cube_extent, camera_cube_extent)
+    cam_z = random.uniform(float(camera_z_range[0]), float(camera_z_range[1]))
+
+    cam_position = [cam_x, cam_y, cam_z]
+    
+    # Compute camera rotation with height-dependent pitch
+    # At z_reference, pitch = base_pitch_deg; changes by pitch_scale per unit Z
+    z_reference = config.get('camera_pitch_z_reference', 8.0)
+    base_pitch_deg = config.get('camera_pitch_base_deg', 90.0)
+    pitch_scale = config.get('camera_pitch_scale_per_unit_z', 2.0)
+    max_z_lookat_origin = config.get('camera_pitch_max_z_lookat_origin', 25.0)
+    if cam_z >= max_z_lookat_origin:
+        # Prevent over-tilt at high altitude by using direct look-at to the target.
+        cam_euler = euler_from_look_at(cam_position, look_at, up)
+    else:
+        cam_euler = euler_from_height_dependent_pitch(
+            cam_position,
+            look_at,
+            z_reference=z_reference,
+            base_pitch_deg=base_pitch_deg,
+            pitch_scale=pitch_scale,
+            up=up,
+        )
+    
+    # Set the actual camera object's location and rotation in the Blender scene
+    # so it appears at the correct position when the .blend file is opened/saved
+    if bpy.context.scene.camera:
+        bpy.context.scene.camera.location = cam_position
+        bpy.context.scene.camera.rotation_euler = cam_euler
     
     # Create camera poses - duplicate for interpolation compatibility
     # Fixed camera needs multiple identical poses to satisfy interpolation requirements
@@ -1102,7 +1169,7 @@ def main():
         bpy.context.scene.render.use_simplify = False
         print("GPU rendering enabled for Eevee")
     else:
-        bproc.renderer.set_cpu_threads(8)
+        bproc.renderer.set_cpu_threads(int(config.get('num_cpu_threads', 8)))
 
     # TODO: Currently we only use slow fps RGB image for ref video, so close motion blur simulation
     bpy.context.scene.render.use_motion_blur = False
@@ -1184,7 +1251,7 @@ def main():
     
     # GPU already enabled in first pass, just skip CPU thread setting if using GPU
     if not use_gpu:
-        bproc.renderer.set_cpu_threads(8)
+        bproc.renderer.set_cpu_threads(int(config.get('num_cpu_threads', 8)))
 
     # bproc.renderer.enable_motion_blur(motion_blur_length=0.0)
     bpy.context.scene.render.use_motion_blur = False
