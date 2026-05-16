@@ -656,7 +656,26 @@ def setup_fill_light(cam_position, look_at):
     look_at = np.array(look_at, dtype=float)
     mode = config.get('fill_light_position_mode', 'camera_offset')
 
-    if mode == 'cube_random':
+    if config.get('camera_locked_background', False):
+        view_dir = look_at - cam_position
+        view_norm = np.linalg.norm(view_dir)
+        if view_norm < 1e-6:
+            view_dir = np.array([0.0, 1.0, 0.0], dtype=float)
+            view_norm = 1.0
+        else:
+            view_dir = view_dir / view_norm
+
+        bg_plane_distance = 300.0
+        # Place light close to the subject (slightly toward camera) for stable foreground illumination.
+        subject_backoff = 1.5
+        pos_candidate = look_at - view_dir * subject_backoff
+        proj = float(np.dot(pos_candidate - cam_position, view_dir))
+        proj = min(max(proj, 2.0), bg_plane_distance * 0.7)
+        pos = cam_position + view_dir * proj + np.array([0.0, 0.0, height], dtype=float)
+
+        # Without world/HDR lighting, area lights need substantially higher energy.
+        energy = max(float(energy), 2500.0)
+    elif mode == 'cube_random':
         cube_extent = float(config.get('camera_cube_extent', 25.0))
         full_cube_z = bool(config.get('fill_light_cube_full_z', True))
         min_sep = float(config.get('fill_light_cube_min_separation', 3.0))
@@ -1010,18 +1029,177 @@ def setup_camera_intrinsic():
     width, height = config['image_width'], config['image_height']
     bproc.camera.set_resolution(width, height)
 
+
+def get_solid_background_color():
+    global config
+    cached_color = config.get('_sampled_solid_background_color')
+    if cached_color is not None:
+        return cached_color
+
+    randomize_solid_background = config.get('randomize_solid_background', False)
+    if randomize_solid_background:
+        gray_min, gray_max = config.get('solid_background_gray_range', [0.2, 0.8])
+        gray = random.uniform(float(gray_min), float(gray_max))
+        color = [gray, gray, gray]
+    else:
+        color = config.get('solid_background_color', [0.5, 0.5, 0.5])
+
+    config['_sampled_solid_background_color'] = [float(color[0]), float(color[1]), float(color[2])]
+    return config['_sampled_solid_background_color']
+
+
+def get_sampled_hdri_path():
+    global config
+    cached_path = config.get('_sampled_hdri_path')
+    if cached_path is not None:
+        return cached_path
+
+    hdr_dir = config['hdr_dir']
+    hdr_folders = [f for f in os.listdir(hdr_dir) if os.path.isdir(os.path.join(hdr_dir, f))]
+    if not hdr_folders:
+        print(f"Warning: No HDRI folders found in {hdr_dir}")
+        return None
+
+    hdr_folder = random.choice(hdr_folders)
+    hdr_folder_path = os.path.join(hdr_dir, hdr_folder)
+    hdr_files = [f for f in os.listdir(hdr_folder_path) if f.lower().endswith('.hdr')]
+    if not hdr_files:
+        print(f"Warning: No .hdr file found in {hdr_folder_path}")
+        return None
+
+    path = os.path.join(hdr_folder_path, hdr_files[0])
+    config['_sampled_hdri_path'] = path
+    return path
+
+
+def set_plane_uv_region(mesh, u0=0.0, v0=0.0, u1=1.0, v1=1.0):
+    # Keep UV assignment explicit so the camera-locked image can use centered crop when needed.
+    uv_layer = mesh.uv_layers.get('UVMap')
+    if uv_layer is None:
+        uv_layer = mesh.uv_layers.new(name='UVMap')
+
+    uv_coords = [
+        (u0, v0),
+        (u1, v0),
+        (u1, v1),
+        (u0, v1),
+    ]
+    for loop_idx, loop in enumerate(mesh.loops):
+        vert_idx = loop.vertex_index
+        uv_layer.data[loop_idx].uv = uv_coords[vert_idx]
+
+
+def setup_camera_locked_background():
+    global config
+    if not config.get('camera_locked_background', False):
+        return
+
+    scene = bpy.context.scene
+    cam_obj = scene.camera
+    if cam_obj is None:
+        print('Warning: camera_locked_background is enabled but no camera exists.')
+        return
+
+    width = float(config.get('image_width', 320))
+    height = float(config.get('image_height', 320))
+    aspect = width / max(height, 1.0)
+    # Keep the locked HDRI safely behind subject motion while overfilling the frame.
+    distance = 300.0
+    margin = 3.0
+
+    cam_data = cam_obj.data
+    if cam_data.type == 'ORTHO':
+        half_h = float(cam_data.ortho_scale) * 0.5
+        half_w = half_h * aspect
+    else:
+        # Use both camera FOV axes directly so plane coverage matches Blender camera projection.
+        fov_x = float(cam_data.angle_x)
+        fov_y = float(cam_data.angle_y)
+        half_w = distance * math.tan(fov_x * 0.5)
+        half_h = distance * math.tan(fov_y * 0.5)
+
+    half_w *= margin
+    half_h *= margin
+
+    mesh = bpy.data.meshes.new('CameraLockedBackgroundMesh')
+    bg_plane = bpy.data.objects.new('CameraLockedBackground', mesh)
+    scene.collection.objects.link(bg_plane)
+
+    verts = [
+        (-half_w, -half_h, -distance),
+        (half_w, -half_h, -distance),
+        (half_w, half_h, -distance),
+        (-half_w, half_h, -distance),
+    ]
+    faces = [(0, 1, 2, 3)]
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+
+    # Default UVs; may be replaced by centered crop for HDRI aspect preservation.
+    set_plane_uv_region(mesh)
+
+    bg_plane.parent = cam_obj
+    bg_plane.matrix_parent_inverse = cam_obj.matrix_world.inverted()
+
+    bg_mat = bpy.data.materials.new('CameraLockedBackgroundMat')
+    bg_mat.use_nodes = True
+    nodes = bg_mat.node_tree.nodes
+    links = bg_mat.node_tree.links
+    nodes.clear()
+
+    emission = nodes.new(type='ShaderNodeEmission')
+    output = nodes.new(type='ShaderNodeOutputMaterial')
+    source = str(config.get('camera_locked_background_source', 'solid')).lower()
+    if source == 'hdri':
+        hdr_path = get_sampled_hdri_path()
+        if hdr_path is None:
+            raise RuntimeError(
+                "camera_locked_background_source='hdri' is enabled but no HDRI was found under hdr_dir"
+            )
+
+        tex_coord = nodes.new(type='ShaderNodeTexCoord')
+        tex_img = nodes.new(type='ShaderNodeTexImage')
+        tex_img.image = bpy.data.images.load(hdr_path, check_existing=True)
+        tex_img.projection = 'FLAT'
+        tex_img.extension = 'EXTEND'
+        links.new(tex_coord.outputs['UV'], tex_img.inputs['Vector'])
+        links.new(tex_img.outputs['Color'], emission.inputs['Color'])
+
+        # Center-crop UVs to preserve image aspect in output frame (avoids panoramic squeeze/warping).
+        img_w = float(max(tex_img.image.size[0], 1))
+        img_h = float(max(tex_img.image.size[1], 1))
+        img_aspect = img_w / img_h
+        out_aspect = width / max(height, 1.0)
+
+        if img_aspect > out_aspect:
+            u_span = out_aspect / img_aspect
+            u0 = 0.5 - 0.5 * u_span
+            u1 = 0.5 + 0.5 * u_span
+            set_plane_uv_region(mesh, u0=u0, v0=0.0, u1=u1, v1=1.0)
+        elif img_aspect < out_aspect:
+            v_span = img_aspect / out_aspect
+            v0 = 0.5 - 0.5 * v_span
+            v1 = 0.5 + 0.5 * v_span
+            set_plane_uv_region(mesh, u0=0.0, v0=v0, u1=1.0, v1=v1)
+    else:
+        color = get_solid_background_color()
+        emission.inputs['Color'].default_value = (float(color[0]), float(color[1]), float(color[2]), 1.0)
+    emission.inputs['Strength'].default_value = float(config.get('solid_background_strength', 1.0))
+    links.new(emission.outputs['Emission'], output.inputs['Surface'])
+
+    bg_plane.data.materials.append(bg_mat)
+
 def setup_envmap():
     global config
+    camera_locked_bg_hdri = (
+        config.get('camera_locked_background', False)
+        and str(config.get('camera_locked_background_source', 'solid')).lower() == 'hdri'
+    )
     use_solid_background = config.get('use_solid_background', False)
-    if use_solid_background:
+    # If camera-locked HDRI is enabled, keep world HDRI too so borders never fall back to monochrome.
+    if use_solid_background and not camera_locked_bg_hdri:
         # Configure Blender world nodes for a flat monochrome background.
-        randomize_solid_background = config.get('randomize_solid_background', False)
-        if randomize_solid_background:
-            gray_min, gray_max = config.get('solid_background_gray_range', [0.2, 0.8])
-            gray = random.uniform(float(gray_min), float(gray_max))
-            color = [gray, gray, gray]
-        else:
-            color = config.get('solid_background_color', [0.5, 0.5, 0.5])
+        color = get_solid_background_color()
         strength = float(config.get('solid_background_strength', 1.0))
 
         # Ensure world exists and uses nodes.
@@ -1052,20 +1230,9 @@ def setup_envmap():
             links.new(bg_node.outputs['Background'], output_node.inputs['Surface'])
         return
 
-    hdr_dir = config['hdr_dir']
-    hdr_folders = [f for f in os.listdir(hdr_dir) if os.path.isdir(os.path.join(hdr_dir, f))]
-    hdr_folder = random.choice(hdr_folders)
-    # hdr_folder = "autumn_forest_01"  # For testing
-    
-    # Find the actual .hdr file in the folder
-    hdr_folder_path = os.path.join(hdr_dir, hdr_folder)
-    hdr_files = [f for f in os.listdir(hdr_folder_path) if f.endswith('.hdr')]
-    if hdr_files:
-        hdr_file = hdr_files[0]  # Take the first .hdr file
-        path = os.path.join(hdr_folder_path, hdr_file)
+    path = get_sampled_hdri_path()
+    if path is not None:
         bproc.world.set_world_background_hdr_img(path)
-    else:
-        print(f"Warning: No .hdr file found in {hdr_folder_path}")
 
 def setup_human_env(mode):
     """
@@ -1080,12 +1247,14 @@ def setup_human_env(mode):
     
     # Set camera clipping to avoid near-plane clipping
     bpy.context.scene.camera.data.clip_start = 0.1
-    bpy.context.scene.camera.data.clip_end = 100.0
+    bpy.context.scene.camera.data.clip_end = 1000.0
     
     up = [0, 0, 1]
     
     # Setup environment map for lighting
     setup_envmap()
+    # Optional camera-attached background that stays static in image space.
+    setup_camera_locked_background()
     
     # Load human model and animation
     human_model_dir = config.get('human_model_dir', 'data/human_models')
@@ -1185,7 +1354,10 @@ def setup_human_env(mode):
 
         anim_start = float(config.get('anim_frame_start', 0.0))
         anim_len = float(config.get('anim_frame_length', max(1, num_keyframes)))
-        sample_frames = np.linspace(anim_start, anim_start + max(1.0, anim_len - 1.0), num_keyframes)
+        rgb_fps = float(config.get('rgb_image_fps', 30.0))
+        rendered_anim_frames = float(max(1.0, round(rgb_fps * float(config.get('duration', 1.0)))))
+        sample_anim_span = min(anim_len, rendered_anim_frames)
+        sample_frames = np.linspace(anim_start, anim_start + max(1.0, sample_anim_span - 1.0), num_keyframes)
 
         hip_points = [bone_world_position(human_objs, bone_name=target_bone, frame=f) for f in sample_frames]
 

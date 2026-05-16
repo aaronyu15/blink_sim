@@ -211,17 +211,21 @@ class DatasetAnalyzer:
             self._log(f"Error processing {flow_path}: {e}")
 
     def analyze_flow_h5_file(self, flow_h5_path):
-        """Analyze one sequence-level flow_gt.h5 file."""
+        """Analyze one sequence-level flow.h5 file."""
         try:
             relative_path = flow_h5_path.relative_to(self.dataset_path)
             with h5py.File(flow_h5_path, 'r') as f:
-                if 'flow' not in f:
-                    self._log(f"Warning: Expected dataset 'flow' not found in {flow_h5_path}")
+                if 'flow/forward' not in f:
+                    self._log(f"Warning: Expected dataset 'flow/forward' not found in {flow_h5_path}")
                     return 0
-                flow_ds = f['flow']
+                flow_ds = f['flow/forward']
+                valid_ds = f['flow/valid'] if 'flow/valid' in f else None
                 frame_count = flow_ds.shape[0]
                 for frame_idx in range(frame_count):
-                    extracted = self._extract_valid_flow(flow_ds[frame_idx])
+                    frame = flow_ds[frame_idx]  # (H, W, 2)
+                    if valid_ds is not None:
+                        frame = np.concatenate([frame, valid_ds[frame_idx]], axis=-1)  # (H, W, 3)
+                    extracted = self._extract_valid_flow(frame)
                     if extracted is None:
                         continue
                     sample_name = f"{relative_path}:{frame_idx}"
@@ -232,14 +236,18 @@ class DatasetAnalyzer:
         return 0
 
     def accumulate_flow_h5_histograms(self, flow_h5_path):
-        """Second-pass histogram accumulation for one sequence-level flow_gt.h5 file."""
+        """Second-pass histogram accumulation for one sequence-level flow.h5 file."""
         try:
             with h5py.File(flow_h5_path, 'r') as f:
-                if 'flow' not in f:
+                if 'flow/forward' not in f:
                     return
-                flow_ds = f['flow']
+                flow_ds = f['flow/forward']
+                valid_ds = f['flow/valid'] if 'flow/valid' in f else None
                 for frame_idx in range(flow_ds.shape[0]):
-                    extracted = self._extract_valid_flow(flow_ds[frame_idx])
+                    frame = flow_ds[frame_idx]  # (H, W, 2)
+                    if valid_ds is not None:
+                        frame = np.concatenate([frame, valid_ds[frame_idx]], axis=-1)  # (H, W, 3)
+                    extracted = self._extract_valid_flow(frame)
                     if extracted is None:
                         continue
                     flow_u_valid, flow_v_valid, magnitude, _angles = extracted
@@ -247,53 +255,72 @@ class DatasetAnalyzer:
         except Exception as e:
             self._log(f"Error building histograms from {flow_h5_path}: {e}")
     
-    def analyze_event_file(self, event_path):
-        """Analyze a single event .h5 file with x,y,t,p format"""
+    def analyze_event_windows(self, flow_h5_path, event_h5_path):
+        """Analyze event statistics per flow-frame window using flow/event_start and flow/event_end.
+
+        Each sample is defined as the event window associated with one ground-truth flow frame.
+        Returns the number of windows processed.
+        """
+        num_windows = 0
         try:
-            with h5py.File(event_path, 'r') as f:
-                # Events are stored in separate datasets: events/x, events/y, events/t, events/p
-                if 'events/x' in f and 'events/y' in f and 'events/t' in f and 'events/p' in f:
-                    x = f['events/x'][:]
-                    y = f['events/y'][:]
-                    t = f['events/t'][:]
-                    p = f['events/p'][:]
-                    
-                    num_events = len(x)
+            with h5py.File(flow_h5_path, 'r') as flow_f, h5py.File(event_h5_path, 'r') as event_f:
+                if not all(k in event_f for k in ['events/x', 'events/y', 'events/t', 'events/p']):
+                    self._log(f"Warning: Expected events/x,y,t,p not found in {event_h5_path}")
+                    return 0
+                if 'flow/event_start' not in flow_f or 'flow/event_end' not in flow_f:
+                    self._log(f"Warning: flow/event_start or flow/event_end not found in {flow_h5_path}")
+                    return 0
+
+                t = event_f['events/t'][:]
+                x = event_f['events/x'][:]
+                y = event_f['events/y'][:]
+                p = event_f['events/p'][:]
+                event_start_arr = flow_f['flow/event_start'][:]  # absolute timestamps, us
+                event_end_arr   = flow_f['flow/event_end'][:]
+
+                for i in range(len(event_start_arr)):
+                    t0 = int(event_start_arr[i])
+                    t1 = int(event_end_arr[i])
+                    si = np.searchsorted(t, t0, side='left')
+                    ei = np.searchsorted(t, t1, side='left')
+
+                    win_x = x[si:ei]
+                    win_y = y[si:ei]
+                    win_t = t[si:ei]
+                    win_p = p[si:ei]
+                    num_events = int(ei - si)
+
                     self.event_stats['total_events'] += num_events
                     self.event_stats['events_per_sample'].append(num_events)
                     self.event_stats['sample_count'] += 1
-                    
-                    # Sample data for histograms (max 10k events per file)
+
                     if len(self.event_stats['x_coords']) < self.max_histogram_samples:
-                        self.event_stats['x_coords'].extend(x.tolist())
-                        self.event_stats['y_coords'].extend(y.tolist())
-                        self.event_stats['polarities'].extend(p.tolist())
-                    
-                    # Compute time span for this sample
-                    if num_events > 0:
-                        time_span = float(t[-1] - t[0])
-                        self.event_stats['time_spans'].append(time_span)
-                        if time_span > 0:
-                            self.event_stats['event_rate_per_sec'].append(num_events / (time_span * 1e-6))
-                    
-                    # Count polarities
-                    unique_p, counts = np.unique(p, return_counts=True)
-                    positive_events = 0
-                    for pol, count in zip(unique_p, counts):
-                        pol_int = int(pol)
-                        self.event_stats['polarity_counts'][pol_int] = \
-                            self.event_stats['polarity_counts'].get(pol_int, 0) + int(count)
-                        if pol > 0:
-                            positive_events += int(count)
+                        self.event_stats['x_coords'].extend(win_x.tolist())
+                        self.event_stats['y_coords'].extend(win_y.tolist())
+                        self.event_stats['polarities'].extend(win_p.tolist())
+
+                    time_span = float(t1 - t0)
+                    self.event_stats['time_spans'].append(time_span)
+                    if time_span > 0:
+                        self.event_stats['event_rate_per_sec'].append(num_events / (time_span * 1e-6))
 
                     if num_events > 0:
+                        unique_p, counts_p = np.unique(win_p, return_counts=True)
+                        positive_events = 0
+                        for pol, cnt in zip(unique_p, counts_p):
+                            pol_int = int(pol)
+                            self.event_stats['polarity_counts'][pol_int] = (
+                                self.event_stats['polarity_counts'].get(pol_int, 0) + int(cnt)
+                            )
+                            if pol > 0:
+                                positive_events += int(cnt)
                         self.event_stats['positive_fraction_per_sample'].append(positive_events / num_events)
-                else:
-                    self._log(f"Warning: Expected format 'events/x,y,t,p' not found in {event_path}")
-                    self._log(f"Available keys: {list(f.keys())}")
-                
+
+                    num_windows += 1
+
         except Exception as e:
-            self._log(f"Error processing {event_path}: {e}")
+            self._log(f"Error processing event windows from {flow_h5_path}: {e}")
+        return num_windows
     
     def analyze_flow_with_event_mask(self, flow_path, event_path_curr, event_path_prev=None):
         """
@@ -418,17 +445,20 @@ class DatasetAnalyzer:
             self._log(f"Error processing event-masked flow {flow_path}: {e}")
 
     def analyze_flow_h5_with_event_mask(self, flow_h5_path, event_h5_path, frame_fps=30.0):
-        """Analyze flow_gt.h5 using an event mask built from the shared sequence event stream."""
+        """Analyze flow.h5 using an event mask built from the shared sequence event stream."""
         try:
             with h5py.File(flow_h5_path, 'r') as flow_f, h5py.File(event_h5_path, 'r') as event_f:
-                if 'flow' not in flow_f:
-                    self._log(f"Warning: Expected dataset 'flow' not found in {flow_h5_path}")
+                if 'flow/forward' not in flow_f:
+                    self._log(f"Warning: Expected dataset 'flow/forward' not found in {flow_h5_path}")
                     return 0
                 if not all(key in event_f for key in ['events/x', 'events/y', 'events/t']):
                     self._log(f"Warning: Expected events/x,y,t not found in {event_h5_path}")
                     return 0
 
-                flow_ds = flow_f['flow']
+                flow_ds = flow_f['flow/forward']
+                valid_ds = flow_f['flow/valid'] if 'flow/valid' in flow_f else None
+                event_start_ds = flow_f['flow/event_start'] if 'flow/event_start' in flow_f else None
+                event_end_ds = flow_f['flow/event_end'] if 'flow/event_end' in flow_f else None
                 x = event_f['events/x'][:]
                 y = event_f['events/y'][:]
                 t = event_f['events/t'][:]
@@ -437,14 +467,15 @@ class DatasetAnalyzer:
 
                 processed = 0
                 num_frames = flow_ds.shape[0]
-                total_duration_us = float(t[-1] - t[0])
+                # Fallback FPS-based timing when event_start/end metadata is absent
                 t_start_us = float(t[0])
-                frame_interval_us = total_duration_us / max(1, num_frames)
-                if frame_fps > 0:
-                    frame_interval_us = min(frame_interval_us, 1e6 / frame_fps)
+                frame_interval_us = 1e6 / frame_fps if frame_fps > 0 else 1e6 / 30.0
 
                 for frame_idx in range(num_frames):
-                    flow_frame = flow_ds[frame_idx]
+                    frame = flow_ds[frame_idx]  # (H, W, 2)
+                    if valid_ds is not None:
+                        frame = np.concatenate([frame, valid_ds[frame_idx]], axis=-1)  # (H, W, 3)
+                    flow_frame = frame
                     if len(flow_frame.shape) != 3 or flow_frame.shape[2] not in (2, 3):
                         continue
 
@@ -453,8 +484,12 @@ class DatasetAnalyzer:
                     h, w = flow_u.shape
                     valid_mask = (flow_frame[:, :, 2] > 0.5) if flow_frame.shape[2] == 3 else np.ones((h, w), dtype=bool)
 
-                    t1 = t_start_us + (frame_idx + 1) * frame_interval_us
-                    t0 = max(t_start_us, t1 - _EVENT_WINDOW_US)
+                    if event_start_ds is not None and event_end_ds is not None:
+                        t0 = float(event_start_ds[frame_idx])
+                        t1 = float(event_end_ds[frame_idx])
+                    else:
+                        t1 = t_start_us + (frame_idx + 1) * frame_interval_us
+                        t0 = max(t_start_us, t1 - _EVENT_WINDOW_US)
                     start_idx = np.searchsorted(t, t0, side='left')
                     end_idx = np.searchsorted(t, t1, side='left')
                     self.event_stats['events_per_flow_frame'].append(int(end_idx - start_idx))
@@ -651,29 +686,14 @@ class DatasetAnalyzer:
         self._log("\nPass 1: Computing data ranges...")
         for subdir in tqdm(subdirs, desc="Pass 1"):
             # Process flow files
-            flow_dir = subdir / 'forward_flow'
-            if flow_dir.exists():
-                flow_h5_file = flow_dir / 'flow_gt.h5'
-                if flow_h5_file.exists():
-                    flow_count += self.analyze_flow_h5_file(flow_h5_file)
-                else:
-                    flow_files = sorted(flow_dir.glob('*.npy'))
-                    for flow_file in flow_files:
-                        self.analyze_flow_file(flow_file)
-                        flow_count += 1
-            
-            # Process event files
-            event_dir = subdir / 'events_left'
-            if event_dir.exists():
-                event_h5_file = event_dir / 'events.h5'
-                if event_h5_file.exists():
-                    self.analyze_event_file(event_h5_file)
-                    event_count += 1
-                else:
-                    event_files = list(event_dir.glob('*.h5'))
-                    for event_file in event_files:
-                        self.analyze_event_file(event_file)
-                        event_count += 1
+            flow_h5_file = subdir / 'flow.h5'
+            if flow_h5_file.exists():
+                flow_count += self.analyze_flow_h5_file(flow_h5_file)
+
+            # Process event files (one sample = one flow-frame event window)
+            event_h5_file = subdir / 'events.h5'
+            if flow_h5_file.exists() and event_h5_file.exists():
+                event_count += self.analyze_event_windows(flow_h5_file, event_h5_file)
         
         # Initialize histograms based on observed range
         self._initialize_histograms()
@@ -681,58 +701,18 @@ class DatasetAnalyzer:
         # PASS 2: Accumulate histogram data
         self._log("\nPass 2: Building histograms from all pixels...")
         for subdir in tqdm(subdirs, desc="Pass 2"):
-            # Process flow files
-            flow_dir = subdir / 'forward_flow'
-            if flow_dir.exists():
-                flow_h5_file = flow_dir / 'flow_gt.h5'
-                if flow_h5_file.exists():
-                    self.accumulate_flow_h5_histograms(flow_h5_file)
-                else:
-                    flow_files = sorted(flow_dir.glob('*.npy'))
-                    for flow_file in flow_files:
-                        flow = np.load(flow_file)
-                        extracted = self._extract_valid_flow(flow)
-                        if extracted is None:
-                            continue
-                        flow_u_valid, flow_v_valid, magnitude, _angles = extracted
-                        self._accumulate_flow_histograms(flow_u_valid, flow_v_valid, magnitude)
+            flow_h5_file = subdir / 'flow.h5'
+            if flow_h5_file.exists():
+                self.accumulate_flow_h5_histograms(flow_h5_file)
         
         # PASS 3: Event-based valid mask analysis
         self._log("\nPass 3: Analyzing with event-based valid masks...")
         event_mask_count = 0
         for subdir in tqdm(subdirs, desc="Pass 3"):
-            flow_dir = subdir / 'forward_flow'
-            event_dir = subdir / 'events_left'
-            
-            if flow_dir.exists() and event_dir.exists():
-                flow_h5_file = flow_dir / 'flow_gt.h5'
-                event_h5_file = event_dir / 'events.h5'
-                if flow_h5_file.exists() and event_h5_file.exists():
-                    event_mask_count += self.analyze_flow_h5_with_event_mask(flow_h5_file, event_h5_file)
-                else:
-                    flow_files = sorted(flow_dir.glob('*.npy'))
-                    event_files = sorted(event_dir.glob('*.h5'))
-
-                    event_map = {}
-                    for event_file in event_files:
-                        try:
-                            frame_idx = int(event_file.stem)
-                            event_map[frame_idx] = event_file
-                        except ValueError:
-                            continue
-
-                    for flow_file in flow_files:
-                        try:
-                            flow_idx = int(flow_file.stem)
-                        except ValueError:
-                            continue
-
-                        event_curr = event_map.get(flow_idx + 1)
-                        event_prev = event_map.get(flow_idx)
-
-                        if event_curr:
-                            self.analyze_flow_with_event_mask(flow_file, event_curr, event_prev)
-                            event_mask_count += 1
+            flow_h5_file = subdir / 'flow.h5'
+            event_h5_file = subdir / 'events.h5'
+            if flow_h5_file.exists() and event_h5_file.exists():
+                event_mask_count += self.analyze_flow_h5_with_event_mask(flow_h5_file, event_h5_file)
         
         self._log(f"\nTotal processed: {flow_count} flow files and {event_count} event files")
         self._log(f"Event-masked analysis: {event_mask_count} flow-event pairs")

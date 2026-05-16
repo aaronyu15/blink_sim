@@ -13,18 +13,20 @@ event_noise_rate: 20000      # Salt-and-pepper noise rate in events per second (
 
 # Human model and animation directories
 human_model_dir: 'data/human_models'
-human_anim_dir: 'data/human_animations/train'
-active_human_models: []  # Optional list of model basenames to include; empty means all
-active_human_anims: []    # Optional list of animation basenames to include; empty means all
-clips_per_character: 24 # 0 means default to seq_range length; otherwise controls clips per active model.
+human_anim_dir: 'data/human_animations/test'
+active_human_models: ['girl3']  # Optional list of model basenames to include; empty means all
+active_human_anims: ['137_16_drunk_walk']    # Optional list of animation basenames to include; empty means all
+clips_per_character: 2 # 0 means default to seq_range length; otherwise controls clips per active model.
 
 # HDR environment for lighting
 hdr_dir: 'data/haven/hdris/'
-use_solid_background: true
+use_solid_background: false
 solid_background_color: [0.5, 0.5, 0.5]
 randomize_solid_background: true
 solid_background_gray_range: [0.2, 0.8]
 solid_background_strength: 1.0
+camera_locked_background: true
+camera_locked_background_source: 'hdri'  # 'solid' or 'hdri'
 
 
 # Keep imported character transform untouched; randomization comes from camera motion.
@@ -72,7 +74,7 @@ fill_light_cube_min_separation: 5.0  # Keep light at least this far from camera 
 fill_light_cube_max_attempts: 30
 fill_light_energy: [0, 100]
 fill_light_distance: 1.0
-fill_light_height: 0.75
+fill_light_height: 10.75
 fill_light_size: 1.0
 
 # Sequence range
