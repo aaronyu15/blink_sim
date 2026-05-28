@@ -15,8 +15,8 @@ event_noise_rate: 20000      # Salt-and-pepper noise rate in events per second (
 human_model_dir: 'data/human_models'
 human_anim_dir: 'data/human_animations/test'
 active_human_models: ['girl3']  # Optional list of model basenames to include; empty means all
-active_human_anims: ['137_16_drunk_walk']    # Optional list of animation basenames to include; empty means all
-clips_per_character: 2 # 0 means default to seq_range length; otherwise controls clips per active model.
+active_human_anims: []    # Optional list of animation basenames to include; empty means all
+clips_per_character: 24 # 0 means default to seq_range length; otherwise controls clips per active model.
 
 # HDR environment for lighting
 hdr_dir: 'data/haven/hdris/'
@@ -34,8 +34,8 @@ camera_target: [0.0, 0.0, 0.0]
 camera_target_mode: 'hips_bone'  # 'hips_bone' uses animated hips transform; 'model_initial' uses model center; 'fixed' uses camera_target
 camera_target_bone: 'Hips'  # Preferred bone name for camera_target_mode='hips_bone' (auto-fallback to hips/pelvis aliases)
 camera_target_frame: 0  # Frame used when camera_target_mode='model_initial' (default: animation start if available)
-camera_cube_extent: 40.0  # Half-side length of cube around origin (±25 in X and Y)
-camera_z_range: [5.0, 30.0]  # Z range for upper half of cube
+camera_cube_extent: 20.0  # Half-side length of cube around origin (±25 in X and Y)
+camera_z_range: [5.0, 20.0]  # Z range for upper half of cube
 camera_pitch_z_reference: 8.0  # Z height where pitch = camera_pitch_base_deg (typically 90° for straight down)
 camera_pitch_base_deg: 90.0  # Pitch angle in degrees at z_reference; Y rot = 0, X rot = pitch
 camera_pitch_scale_per_unit_z: 2.0  # Change in pitch per unit of Z above/below reference (degrees/unit)
@@ -47,7 +47,7 @@ camera_follow_edge_margin: 0.5  # Normalized margin (0-0.5); larger means tracki
 camera_follow_min_target_shift: 0.20  # Meters; ignore tiny hips jitter when deciding to pan/tilt
 camera_follow_distance: 4.0  # Distance kept behind motion direction
 camera_follow_height_offset: 2.0  # Vertical offset above hips target
-camera_follow_inertia: 0.45  # 0=no smoothing, closer to 1=slower smoother follow
+camera_follow_inertia: 0.95  # 0=no smoothing, closer to 1=slower smoother follow
 
 # Legacy fields (kept for compatibility; not used by current human import path)
 human_x_offset: [0, 0]

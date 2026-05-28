@@ -79,68 +79,8 @@ def sample_pose(obj: bproc.types.MeshObject):
 
 def euler_from_height_dependent_pitch(cam_position, target, z_reference=8.0, base_pitch_deg=90.0, 
                                        pitch_scale=2.0, up=None):
-    """
-    Compute camera euler angles with height-dependent pitch towards target.
-    
-    Camera aims towards target in XY plane, with pitch depending on Z height.
-    - At Z = z_reference: pitch = base_pitch_deg (typically 90° for straight down)
-    - Above z_reference: pitch increases (looking more down)
-    - Below z_reference: pitch decreases (looking more horizontally)
-    
-    Args:
-        cam_position: Camera [x, y, z]
-        target: Target point [x, y, z]
-        z_reference: Z value where pitch = base_pitch_deg (default 8.0)
-        base_pitch_deg: Pitch angle at z_reference in degrees (default 90.0 = straight down)
-        pitch_scale: How much pitch changes per unit of Z, in degrees/unit (default 2.0)
-        up: Up vector for camera (default [0, 0, 1] for Blender)
-    
-    Returns:
-        Euler angles [X, Y, Z] in radians for Blender
-    """
-    if up is None:
-        up = np.array([0, 0, 1])
-    else:
-        up = np.array(up)
-    
-    cam_pos = np.array(cam_position)
-    target_pos = np.array(target)
-    
-    # Height-dependent pitch: compute pitch angle based on camera Z position
-    cam_z = cam_pos[2]
-    pitch_deg = base_pitch_deg + pitch_scale * (cam_z - z_reference)
-
-    # Convert legacy pitch into a stable downward-tilt angle:
-    # - <= 90 deg: level (no downward tilt)
-    # - > 90 deg: progressively tilt down, clamped for stability
-    down_tilt_deg = np.clip(max(0.0, pitch_deg - 90.0), 0.0, 89.0)
-    down_tilt_rad = np.radians(down_tilt_deg)
-    
-    # Compute horizontal direction from camera towards target in XY plane
-    horiz_dir = target_pos[:2] - cam_pos[:2]
-    horiz_dist = np.linalg.norm(horiz_dir)
-    
-    if horiz_dist > 0.001:
-        horiz_dir = horiz_dir / horiz_dist
-    else:
-        # If camera is directly above target in XY, default to looking in +Y direction
-        horiz_dir = np.array([0, 1])
-    
-    # Create an effective look-at point by combining:
-    # - Horizontal aiming (towards target's XY projection)
-    # - Height-dependent pitch
-    # This look-at point is roughly where the camera should be aiming
-    look_ahead_dist = 50.0  # How far ahead to compute the look-at point
-    forward_horiz = horiz_dir * look_ahead_dist
-    # Vertical component from bounded downward tilt.
-    # At/under z_reference this is 0 (more level); above z_reference it tilts down smoothly.
-    forward_vert = -look_ahead_dist * np.tan(down_tilt_rad)
-    
-    # Effective look-at point
-    effective_lookat = cam_pos + np.array([forward_horiz[0], forward_horiz[1], forward_vert])
-    
-    # Now use the standard euler_from_look_at to compute the rotation
-    return euler_from_look_at(cam_pos, effective_lookat, up)
+    # Camera is fixed: this function is not needed
+    return np.zeros(3)
 
 def euler_from_look_at(position, target, up):
     forward = np.subtract(target, position)
@@ -261,6 +201,61 @@ def bone_world_position(mesh_objs, bone_name='Hips', frame=None):
     return np.array([world_head.x, world_head.y, world_head.z], dtype=float)
 
 
+def bone_forward_world(mesh_objs, bone_name='Hips', frame=None):
+    """Return hips forward direction in world XY plane; fallback to +Y."""
+    armature = _find_primary_armature(mesh_objs)
+    if armature is None:
+        return np.array([0.0, 1.0, 0.0], dtype=float)
+
+    scene = bpy.context.scene
+    original_frame = scene.frame_current
+    if frame is not None:
+        scene.frame_set(int(frame))
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    arm_eval = armature.evaluated_get(depsgraph)
+    pose_bones = arm_eval.pose.bones
+
+    candidates = [
+        bone_name,
+        'Hips',
+        'hips',
+        'mixamorig:Hips',
+        'pelvis',
+        'Pelvis',
+    ]
+    pb = None
+    for name in candidates:
+        if name in pose_bones:
+            pb = pose_bones[name]
+            break
+    if pb is None:
+        for name in pose_bones.keys():
+            lname = name.lower()
+            if 'hip' in lname or 'pelvis' in lname:
+                pb = pose_bones[name]
+                break
+
+    if pb is None:
+        if frame is not None:
+            scene.frame_set(original_frame)
+        return np.array([0.0, 1.0, 0.0], dtype=float)
+
+    world_rot = (arm_eval.matrix_world @ pb.matrix).to_3x3()
+    forward = np.array(world_rot @ Vector((0.0, 1.0, 0.0)), dtype=float)
+    forward[2] = 0.0
+    n = np.linalg.norm(forward)
+    if n < 1e-6:
+        forward = np.array([0.0, 1.0, 0.0], dtype=float)
+    else:
+        forward = forward / n
+
+    if frame is not None:
+        scene.frame_set(original_frame)
+
+    return forward
+
+
 def point_view_coords(cam_obj, point_world, cam_location, cam_euler):
     """Project a world point into normalized camera view coordinates for a hypothetical camera pose."""
     scene = bpy.context.scene
@@ -283,6 +278,89 @@ def target_near_edge(cam_obj, point_world, cam_location, cam_euler, edge_margin=
     if z <= 0.0:
         return True
     return (x < edge_margin or x > 1.0 - edge_margin or y < edge_margin or y > 1.0 - edge_margin)
+
+
+def target_visible_in_active_camera(point_world, margin=0.05):
+    """Return True when point_world projects inside camera frame with margin."""
+    scene = bpy.context.scene
+    cam_obj = scene.camera
+    if cam_obj is None:
+        return False
+    co = world_to_camera_view(scene, cam_obj, Vector(point_world))
+    return bool(co.z > 0.0 and margin <= co.x <= 1.0 - margin and margin <= co.y <= 1.0 - margin)
+
+
+def subject_visible_in_active_camera(mesh_objs, bone_name='Hips', frame=0, margin=0.05, center_fallback=True):
+    """Return subject visibility using hips, with optional model-center fallback for robustness."""
+    hip = bone_world_position(mesh_objs, bone_name=bone_name, frame=frame)
+    if target_visible_in_active_camera(hip, margin=margin):
+        return True
+
+    if center_fallback:
+        center = model_center_world(mesh_objs, frame=frame)
+        return target_visible_in_active_camera(center, margin=margin)
+
+    return False
+
+
+def randomize_camera_around_target(target_world, cfg, target_forward=None):
+    """Place static camera at random spherical offset and look near target."""
+    scene = bpy.context.scene
+    cam_obj = scene.camera
+    if cam_obj is None:
+        return None, None
+
+    dist_min, dist_max = cfg.get('camera_random_distance_range', [6.0, 12.0])
+    elev_deg_min, elev_deg_max = cfg.get('camera_random_elevation_deg_range', [10.0, 45.0])
+    jitter_xyz = cfg.get('camera_target_jitter_xyz', [0.5, 0.5, 0.2])
+
+    dist = random.uniform(float(dist_min), float(dist_max))
+    elev = math.radians(random.uniform(float(elev_deg_min), float(elev_deg_max)))
+
+    up = np.array([0.0, 0.0, 1.0], dtype=float)
+    # Unbiased horizontal sampling: uniform azimuth around subject in world XY.
+    azimuth = random.uniform(-math.pi, math.pi)
+    horiz_dir = np.array([math.cos(azimuth), math.sin(azimuth), 0.0], dtype=float)
+
+    dx = dist * math.cos(elev) * horiz_dir[0]
+    dy = dist * math.cos(elev) * horiz_dir[1]
+    dz = dist * math.sin(elev)
+
+    cam_pos = np.asarray(target_world, dtype=float) + np.array([dx, dy, dz], dtype=float)
+    look_jitter = np.array([
+        random.uniform(-float(jitter_xyz[0]), float(jitter_xyz[0])),
+        random.uniform(-float(jitter_xyz[1]), float(jitter_xyz[1])),
+        random.uniform(-float(jitter_xyz[2]), float(jitter_xyz[2])),
+    ], dtype=float)
+    look_at = np.asarray(target_world, dtype=float) + look_jitter
+
+    cam_obj.location = cam_pos
+    cam_obj.rotation_euler = euler_from_look_at(cam_pos, look_at, up)
+    return cam_pos, look_at
+
+
+def shift_armature_actions(mesh_objs, frame_offset):
+    """Shift armature action keyframes in time so rendered frame 0 starts at frame_offset."""
+    shifted = set()
+    armatures = []
+    for obj in mesh_objs:
+        bpy_obj = obj.blender_obj if hasattr(obj, 'blender_obj') else obj
+        parent = getattr(bpy_obj, 'parent', None)
+        if parent is not None and parent.type == 'ARMATURE':
+            armatures.append(parent)
+    for arm in armatures:
+        if arm.name in shifted:
+            continue
+        if arm.animation_data is None or arm.animation_data.action is None:
+            continue
+        action = arm.animation_data.action
+        for fcu in action.fcurves:
+            for kf in fcu.keyframe_points:
+                kf.co.x -= float(frame_offset)
+                kf.handle_left.x -= float(frame_offset)
+                kf.handle_right.x -= float(frame_offset)
+            fcu.update()
+        shifted.add(arm.name)
 
 def make_action_cyclic(action):
     """Add cyclic modifiers so an action loops for the full render duration."""
@@ -1544,10 +1622,105 @@ def main():
         bpy.ops.wm.save_as_mainfile(filepath=blend_path, copy=True)
         print(f"Saved .blend file to {blend_path}")
 
-    ########### first pass, render motion blur ########### 
-    rgb_fps = config['rgb_image_fps']
-    rgb_frames = int(round(rgb_fps * config['duration']))  # exact count
+    ########### visibility-driven clip selection ###########
+    rgb_fps = int(config['rgb_image_fps'])
+    event_fps = int(config['event_image_fps'])
+    desired_rgb_frames = int(round(float(config['duration']) * float(rgb_fps)))
+    # Initialize defensively so downstream code always has defined frame counts.
+    rgb_frames = max(1, desired_rgb_frames)
+    event_frames = max(1, int(round(float(rgb_frames) * float(event_fps) / float(rgb_fps))))
+    min_clip_sec = float(config.get('min_visible_clip_sec', 0.5))
+    min_visible_rgb_frames = max(1, int(round(min_clip_sec * float(rgb_fps))))
+    vis_margin = float(config.get('camera_visibility_margin', 0.05))
+    camera_attempts = int(config.get('camera_visibility_attempts', 12))
+    post_exit_tail_frames = max(0, int(config.get('camera_post_exit_tail_frames', 3)))
+    reentry_grace_frames = max(0, int(config.get('camera_reentry_grace_frames', 0)))
+    target_bone = config.get('camera_target_bone', 'Hips')
+    center_fallback = bool(config.get('camera_use_model_center_visibility_fallback', True))
+
+    if use_humans and len(setup_info.get('dynamic_objs', [])) > 0:
+        anim_start = int(round(float(config.get('anim_frame_start', 0.0))))
+        anim_len = int(round(float(config.get('anim_frame_length', desired_rgb_frames))))
+        anim_len = max(1, anim_len)
+
+        # Only allow start_offset between start and halfway through the available animation clip
+        max_start_offset = max(0, anim_len - 1)
+        halfway_offset = max(0, int(max_start_offset // 2))
+        start_offset = random.randint(0, halfway_offset)
+        source_start_frame = anim_start + start_offset
+
+        # Shift action time so frame 0 corresponds to a random source frame.
+        shift_armature_actions(setup_info['dynamic_objs'], source_start_frame)
+
+        max_candidate_rgb_frames = min(desired_rgb_frames, anim_len - start_offset)
+        max_candidate_rgb_frames = max(1, int(max_candidate_rgb_frames))
+
+        valid_candidates = []
+        all_candidates = []
+        cam_obj = bpy.context.scene.camera
+
+        for _ in range(max(1, camera_attempts)):
+            start_hip = bone_world_position(setup_info['dynamic_objs'], bone_name=target_bone, frame=0)
+            randomize_camera_around_target(start_hip, config)
+
+            visible_len = 0
+            miss_streak = 0
+            streak_start = None
+            first_exit_frame = None
+            for fidx in range(max_candidate_rgb_frames):
+                if subject_visible_in_active_camera(
+                    setup_info['dynamic_objs'],
+                    bone_name=target_bone,
+                    frame=fidx,
+                    margin=vis_margin,
+                    center_fallback=center_fallback,
+                ):
+                    visible_len += 1
+                    miss_streak = 0
+                    streak_start = None
+                else:
+                    if miss_streak == 0:
+                        streak_start = fidx
+                    miss_streak += 1
+                    # End only when out-of-frame streak exceeds grace; re-entry resets the timer.
+                    if miss_streak > reentry_grace_frames:
+                        first_exit_frame = streak_start
+                        break
+
+            if first_exit_frame is None:
+                clip_len = max_candidate_rgb_frames
+            else:
+                # Keep a short temporal tail even after subject exits the frame.
+                clip_len = min(max_candidate_rgb_frames, first_exit_frame + 1 + post_exit_tail_frames)
+
+            if cam_obj is not None:
+                cand = (cam_obj.location.copy(), cam_obj.rotation_euler.copy(), int(max(1, clip_len)), int(visible_len))
+                all_candidates.append(cand)
+                if visible_len >= min_visible_rgb_frames:
+                    valid_candidates.append(cand)
+
+        chosen = None
+        if len(valid_candidates) > 0:
+            chosen = random.choice(valid_candidates)
+        elif len(all_candidates) > 0:
+            # Fallback remains unbiased among attempted camera samples.
+            chosen = random.choice(all_candidates)
+
+        if cam_obj is not None and chosen is not None:
+            cam_obj.location = chosen[0]
+            cam_obj.rotation_euler = chosen[1]
+            rgb_frames = max(1, int(chosen[2]))
+        else:
+            rgb_frames = max(1, min_visible_rgb_frames)
+        config['sampled_animation_start_frame'] = int(source_start_frame)
+    else:
+        rgb_frames = max(1, desired_rgb_frames)
+
+    event_frames = max(1, int(round(float(rgb_frames) * float(event_fps) / float(rgb_fps))))
+
+    ########### first pass, render motion blur ###########
     bpy.context.scene.render.fps = rgb_fps
+    # Always re-apply animation for first pass (reference FPS)
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
         'num_frame': rgb_frames,
@@ -1556,8 +1729,7 @@ def main():
     bpy.context.scene.render.frame_map_old = 1
     bpy.context.scene.render.frame_map_new = 1
     bpy.context.scene.frame_start = 0
-    # Exclusive end so we render exactly rgb_frames frames if renderer iterates range(frame_start, frame_end)
-    bpy.context.scene.frame_end = rgb_frames
+    bpy.context.scene.frame_end = int(rgb_frames)
 
     # Enable GPU rendering if available and configured
     use_gpu = config.get('use_gpu', True)
@@ -1632,16 +1804,15 @@ def main():
     ########### second pass, render clean image for event simulation ###########
     # rgb_reference: Low FPS (rgb_image_fps) motion-blurred frames for reference video & optical flow
     # rgb_event_input: High FPS (event_image_fps) clean HDR frames for event camera simulation 
-    event_fps = config['event_image_fps']
-    event_frames = int(round(event_fps * config['duration']))  # exact count
     bpy.context.scene.render.fps = event_fps
 
+    # Always re-apply and stretch animation for event input pass (high FPS)
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
         'num_frame': event_frames,
         'num_keyframes': config['num_keyframes'],
     })
-    
+
     # Scale skeletal animation keyframes to match the new frame range
     # This ensures the FBX animation plays through the same motion over event_frames as it did over rgb_frames
     scale_factor = float(event_frames) / float(rgb_frames)
@@ -1654,7 +1825,7 @@ def main():
                     kf.handle_left.x *= scale_factor
                     kf.handle_right.x *= scale_factor
                 fcu.update()
-    
+
     bpy.context.scene.render.frame_map_old = 1
     bpy.context.scene.render.frame_map_new = 1
     bpy.context.scene.frame_start = 0

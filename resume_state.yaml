@@ -1,0 +1,12 @@
+resume_state:
+  active_human_anims: []
+  active_human_models:
+  - girl3
+  clips_per_character: 24
+  completed_jobs:
+  - girl3_136_15_walk_back_crouch_0
+  in_progress_job: girl3_137_16_drunk_walk_0
+  last_update: '2026-05-28 20:38:50'
+  seq_range:
+  - 0
+  - 1
