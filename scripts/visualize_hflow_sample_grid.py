@@ -37,8 +37,12 @@ def load_events(events_h5: Path):
 
 def load_flow(flow_h5: Path):
     with h5py.File(flow_h5, "r") as f:
-        flow = f["flow/forward"][:]
-    return flow
+        forward = f["flow/forward"][:]  # (N, H, W, 2)
+        valid = f["flow/valid"][:]      # (N, H, W, 1)
+        event_start = f["flow/event_start"][:] if "flow/event_start" in f else None
+        event_end = f["flow/event_end"][:] if "flow/event_end" in f else None
+    flow = np.concatenate([forward, valid], axis=-1)  # (N, H, W, 3)
+    return flow, event_start, event_end
 
 
 def events_to_rgb(
@@ -154,72 +158,54 @@ def main():
     args = parser.parse_args()
 
     sample_dir = Path(args.sample_dir)
-    rgb_dir = sample_dir / "rgb_reference"
     events_h5 = sample_dir / "events.h5"
     flow_h5 = sample_dir / "flow.h5"
 
-    if not rgb_dir.exists():
-        raise FileNotFoundError(f"Missing directory: {rgb_dir}")
     if not events_h5.exists():
         raise FileNotFoundError(f"Missing file: {events_h5}")
     if not flow_h5.exists():
         raise FileNotFoundError(f"Missing file: {flow_h5}")
 
-    rgb_files = load_rgb_files(rgb_dir)
-    if len(rgb_files) < 2:
-        raise RuntimeError("Need at least 2 RGB frames to form event intervals")
-
-    flow = load_flow(flow_h5)
+    flow, event_start_times, event_end_times = load_flow(flow_h5)
     num_flow = flow.shape[0]
-
-    example_rgb = normalize_rgb(plt.imread(rgb_files[0]))
-    height, width = int(example_rgb.shape[0]), int(example_rgb.shape[1])
+    height, width = flow.shape[1], flow.shape[2]
 
     t, x, y, p = load_events(events_h5)
     if t.size == 0:
         raise RuntimeError("No events found in events.h5")
 
-    max_usable = min(len(rgb_files) - 1, num_flow)
-    if max_usable <= 0:
-        raise RuntimeError("No aligned RGB/event/flow frames available")
+    if num_flow <= 0:
+        raise RuntimeError("No flow frames available")
 
     start = args.index if args.index is not None else args.start_index
     idx = start
 
     if start < 0:
         raise ValueError("--start-index must be >= 0")
-    if idx >= max_usable:
+    if idx >= num_flow:
         raise ValueError(
-            f"Requested index {idx} exceeds usable frames (0..{max_usable - 1})"
+            f"Requested index {idx} exceeds usable frames (0..{num_flow - 1})"
         )
 
-    dt_us = 1e6 / args.fps
-    t_start = float(t[0])
+    if event_start_times is not None and event_end_times is not None:
+        t0 = float(event_start_times[idx])
+        t1 = float(event_end_times[idx])
+    else:
+        dt_us = 1e6 / args.fps
+        t_start = float(t[0])
+        t0 = t_start + idx * dt_us
+        t1 = t_start + (idx + 1) * dt_us
 
-    fig, axes = plt.subplots(1, 3, figsize=(6, 4), squeeze=False)
-    plt.subplots_adjust(left=0.0, right=1.0, top=0.95, bottom=0.12, wspace=0.0, hspace=0.0)
+    event_rgb = events_to_rgb(t, x, y, p, t0, t1, height, width)
+    flow_rgb = flow_to_rgb(flow[idx], mask_invalid=args.mask_invalid)
 
-    def draw(frame_idx):
-        frame_idx = int(frame_idx)
-        for c in range(3):
-            axes[0, c].clear()
-        
-        rgb = normalize_rgb(plt.imread(rgb_files[frame_idx+3]))
+    fig, axes = plt.subplots(1, 2, figsize=(4, 4), squeeze=False)
 
-        t0 = t_start + frame_idx * dt_us
-        t1 = t_start + (frame_idx + 0.5) * dt_us
-        event_rgb = events_to_rgb(t, x, y, p, t0, t1, height, width)
+    axes[0, 0].imshow(event_rgb)
+    axes[0, 1].imshow(flow_rgb)
 
-        flow_rgb = flow_to_rgb(flow[frame_idx], mask_invalid=args.mask_invalid)
-
-        axes[0, 0].imshow(rgb)
-        axes[0, 1].imshow(event_rgb)
-        axes[0, 2].imshow(flow_rgb)
-
-        for c in range(3):
-            axes[0, c].axis("off")
-        
-        fig.suptitle(f"Frame {frame_idx}/{max_usable - 1}", fontsize=10)
+    for c in range(2):
+        axes[0, c].axis("off")
 
     draw(idx)
 

@@ -53,6 +53,15 @@ RENDERING PIPELINE:
 
 config = None
 
+def compute_subject_visibility_fraction(mesh_objs, total_frames, bone_name='Hips', margin=0.05, min_fraction=0.8):
+    """Return (is_enough_visible, visible_mask) where is_enough_visible is True if subject is visible in >= min_fraction of frames."""
+    visible_mask = []
+    for f in range(total_frames):
+        vis = subject_visible_in_active_camera(mesh_objs, bone_name=bone_name, frame=f, margin=margin)
+        visible_mask.append(bool(vis))
+    visible_mask = np.array(visible_mask, dtype=bool)
+    frac_visible = np.mean(visible_mask)
+    return frac_visible >= min_fraction, visible_mask
 def sample_pose(obj: bproc.types.MeshObject):
     global config
     world_length = config['world_length']
@@ -79,68 +88,8 @@ def sample_pose(obj: bproc.types.MeshObject):
 
 def euler_from_height_dependent_pitch(cam_position, target, z_reference=8.0, base_pitch_deg=90.0, 
                                        pitch_scale=2.0, up=None):
-    """
-    Compute camera euler angles with height-dependent pitch towards target.
-    
-    Camera aims towards target in XY plane, with pitch depending on Z height.
-    - At Z = z_reference: pitch = base_pitch_deg (typically 90° for straight down)
-    - Above z_reference: pitch increases (looking more down)
-    - Below z_reference: pitch decreases (looking more horizontally)
-    
-    Args:
-        cam_position: Camera [x, y, z]
-        target: Target point [x, y, z]
-        z_reference: Z value where pitch = base_pitch_deg (default 8.0)
-        base_pitch_deg: Pitch angle at z_reference in degrees (default 90.0 = straight down)
-        pitch_scale: How much pitch changes per unit of Z, in degrees/unit (default 2.0)
-        up: Up vector for camera (default [0, 0, 1] for Blender)
-    
-    Returns:
-        Euler angles [X, Y, Z] in radians for Blender
-    """
-    if up is None:
-        up = np.array([0, 0, 1])
-    else:
-        up = np.array(up)
-    
-    cam_pos = np.array(cam_position)
-    target_pos = np.array(target)
-    
-    # Height-dependent pitch: compute pitch angle based on camera Z position
-    cam_z = cam_pos[2]
-    pitch_deg = base_pitch_deg + pitch_scale * (cam_z - z_reference)
-
-    # Convert legacy pitch into a stable downward-tilt angle:
-    # - <= 90 deg: level (no downward tilt)
-    # - > 90 deg: progressively tilt down, clamped for stability
-    down_tilt_deg = np.clip(max(0.0, pitch_deg - 90.0), 0.0, 89.0)
-    down_tilt_rad = np.radians(down_tilt_deg)
-    
-    # Compute horizontal direction from camera towards target in XY plane
-    horiz_dir = target_pos[:2] - cam_pos[:2]
-    horiz_dist = np.linalg.norm(horiz_dir)
-    
-    if horiz_dist > 0.001:
-        horiz_dir = horiz_dir / horiz_dist
-    else:
-        # If camera is directly above target in XY, default to looking in +Y direction
-        horiz_dir = np.array([0, 1])
-    
-    # Create an effective look-at point by combining:
-    # - Horizontal aiming (towards target's XY projection)
-    # - Height-dependent pitch
-    # This look-at point is roughly where the camera should be aiming
-    look_ahead_dist = 50.0  # How far ahead to compute the look-at point
-    forward_horiz = horiz_dir * look_ahead_dist
-    # Vertical component from bounded downward tilt.
-    # At/under z_reference this is 0 (more level); above z_reference it tilts down smoothly.
-    forward_vert = -look_ahead_dist * np.tan(down_tilt_rad)
-    
-    # Effective look-at point
-    effective_lookat = cam_pos + np.array([forward_horiz[0], forward_horiz[1], forward_vert])
-    
-    # Now use the standard euler_from_look_at to compute the rotation
-    return euler_from_look_at(cam_pos, effective_lookat, up)
+    # Camera is fixed: this function is not needed
+    return np.zeros(3)
 
 def euler_from_look_at(position, target, up):
     forward = np.subtract(target, position)
@@ -261,6 +210,61 @@ def bone_world_position(mesh_objs, bone_name='Hips', frame=None):
     return np.array([world_head.x, world_head.y, world_head.z], dtype=float)
 
 
+def bone_forward_world(mesh_objs, bone_name='Hips', frame=None):
+    """Return hips forward direction in world XY plane; fallback to +Y."""
+    armature = _find_primary_armature(mesh_objs)
+    if armature is None:
+        return np.array([0.0, 1.0, 0.0], dtype=float)
+
+    scene = bpy.context.scene
+    original_frame = scene.frame_current
+    if frame is not None:
+        scene.frame_set(int(frame))
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    arm_eval = armature.evaluated_get(depsgraph)
+    pose_bones = arm_eval.pose.bones
+
+    candidates = [
+        bone_name,
+        'Hips',
+        'hips',
+        'mixamorig:Hips',
+        'pelvis',
+        'Pelvis',
+    ]
+    pb = None
+    for name in candidates:
+        if name in pose_bones:
+            pb = pose_bones[name]
+            break
+    if pb is None:
+        for name in pose_bones.keys():
+            lname = name.lower()
+            if 'hip' in lname or 'pelvis' in lname:
+                pb = pose_bones[name]
+                break
+
+    if pb is None:
+        if frame is not None:
+            scene.frame_set(original_frame)
+        return np.array([0.0, 1.0, 0.0], dtype=float)
+
+    world_rot = (arm_eval.matrix_world @ pb.matrix).to_3x3()
+    forward = np.array(world_rot @ Vector((0.0, 1.0, 0.0)), dtype=float)
+    forward[2] = 0.0
+    n = np.linalg.norm(forward)
+    if n < 1e-6:
+        forward = np.array([0.0, 1.0, 0.0], dtype=float)
+    else:
+        forward = forward / n
+
+    if frame is not None:
+        scene.frame_set(original_frame)
+
+    return forward
+
+
 def point_view_coords(cam_obj, point_world, cam_location, cam_euler):
     """Project a world point into normalized camera view coordinates for a hypothetical camera pose."""
     scene = bpy.context.scene
@@ -283,6 +287,401 @@ def target_near_edge(cam_obj, point_world, cam_location, cam_euler, edge_margin=
     if z <= 0.0:
         return True
     return (x < edge_margin or x > 1.0 - edge_margin or y < edge_margin or y > 1.0 - edge_margin)
+
+
+def target_visible_in_active_camera(point_world, margin=0.05):
+    """Return True when point_world projects inside camera frame with margin."""
+    scene = bpy.context.scene
+    cam_obj = scene.camera
+    if cam_obj is None:
+        return False
+    co = world_to_camera_view(scene, cam_obj, Vector(point_world))
+    return bool(co.z > 0.0 and margin <= co.x <= 1.0 - margin and margin <= co.y <= 1.0 - margin)
+
+
+def subject_visible_in_active_camera(mesh_objs, bone_name='Hips', frame=0, margin=0.05, center_fallback=True):
+    """Return subject visibility using hips, with optional model-center fallback for robustness."""
+    hip = bone_world_position(mesh_objs, bone_name=bone_name, frame=frame)
+    if target_visible_in_active_camera(hip, margin=margin):
+        return True
+
+    if center_fallback:
+        center = model_center_world(mesh_objs, frame=frame)
+        return target_visible_in_active_camera(center, margin=margin)
+
+    return False
+
+
+def hips_trajectory_center(mesh_objs, bone_name='Hips', total_frames=1, max_samples=30):
+    """Estimate subject trajectory center from hips positions over the clip."""
+    n = max(1, int(total_frames))
+    s = max(1, min(int(max_samples), n))
+    sample_frames = np.linspace(0, n - 1, s).astype(np.int32).tolist()
+    pts = [bone_world_position(mesh_objs, bone_name=bone_name, frame=f) for f in sample_frames]
+    return np.mean(np.asarray(pts, dtype=float), axis=0)
+
+
+def _find_bone_by_aliases(mesh_objs, aliases):
+    """Resolve a bone name from aliases/substrings on the primary armature."""
+    armature = _find_primary_armature(mesh_objs)
+    if armature is None or armature.pose is None:
+        return None
+
+    pose_bones = armature.pose.bones
+    names = list(pose_bones.keys())
+    lower_to_name = {n.lower(): n for n in names}
+
+    # Exact aliases first.
+    for a in aliases:
+        al = a.lower()
+        if al in lower_to_name:
+            return lower_to_name[al]
+
+    # Then fuzzy substring match.
+    for n in names:
+        nl = n.lower()
+        for a in aliases:
+            if a.lower() in nl:
+                return n
+
+    return None
+
+
+def select_camera_tracking_bone(mesh_objs, cfg, default_bone='Hips'):
+    """Select per-clip tracking bone (hips/face/hands) with weighted randomness."""
+    if not bool(cfg.get('camera_follow_random_target_parts', False)):
+        return default_bone, 'hips'
+
+    probs = cfg.get('camera_follow_target_part_probs', {'hips': 0.6, 'face': 0.2, 'hands': 0.2})
+    hips_w = max(0.0, float(probs.get('hips', 0.6)))
+    face_w = max(0.0, float(probs.get('face', 0.2)))
+    hands_w = max(0.0, float(probs.get('hands', 0.2)))
+    parts = ['hips', 'face', 'hands']
+    weights = np.asarray([hips_w, face_w, hands_w], dtype=float)
+    if np.sum(weights) <= 0:
+        part = 'hips'
+    else:
+        weights = (weights / np.sum(weights)).tolist()
+        part = random.choices(parts, weights=weights, k=1)[0]
+
+    hips_aliases = [
+        default_bone, 'Hips', 'hips', 'mixamorig:Hips', 'pelvis', 'Pelvis'
+    ]
+    face_aliases = [
+        'Head', 'head', 'mixamorig:Head', 'Neck', 'neck', 'mixamorig:Neck',
+        'HeadTop_End', 'headtop', 'face'
+    ]
+    hand_aliases = [
+        'LeftHand', 'lefthand', 'mixamorig:LeftHand', 'hand_l', 'l_hand', 'left_wrist',
+        'RightHand', 'righthand', 'mixamorig:RightHand', 'hand_r', 'r_hand', 'right_wrist'
+    ]
+
+    if part == 'face':
+        chosen = _find_bone_by_aliases(mesh_objs, face_aliases)
+    elif part == 'hands':
+        chosen = _find_bone_by_aliases(mesh_objs, hand_aliases)
+    else:
+        chosen = _find_bone_by_aliases(mesh_objs, hips_aliases)
+
+    if chosen is None:
+        chosen = _find_bone_by_aliases(mesh_objs, hips_aliases) or default_bone
+        part = 'hips'
+
+    return chosen, part
+
+
+def build_follow_cam_pose_from_hips(mesh_objs, cfg, total_frames, bone_name='Hips'):
+    """Precompute the human trajectory and return one truly static camera pose.
+
+    This version is deliberately fail-closed for locomotion clips: it samples the
+    evaluated mesh bounds over the candidate clip, scores many fixed camera poses,
+    automatically expands the allowed distance when the requested range is too
+    small, and returns identical camera keyframes so both translation and rotation
+    remain fixed.
+    """
+    scene = bpy.context.scene
+    cam_obj = scene.camera
+    if cam_obj is None:
+        return [], []
+
+    n = max(2, int(total_frames))
+    max_samples = int(cfg.get('camera_precompute_max_samples', min(n, 120)))
+    max_samples = max(2, min(max_samples, n))
+    sample_frames = np.linspace(0, n - 1, max_samples).round().astype(np.int32).tolist()
+
+    min_fraction = float(cfg.get('camera_precompute_min_visible_fraction', 0.80))
+    min_fraction = min(max(min_fraction, 0.05), 1.0)
+    view_margin = float(cfg.get('camera_precompute_view_margin', cfg.get('camera_visibility_margin', 0.03)))
+    view_margin = min(max(view_margin, 0.0), 0.45)
+    bbox_corner_fraction = float(cfg.get('camera_precompute_bbox_corner_fraction', 0.15))
+    bbox_corner_fraction = min(max(bbox_corner_fraction, 0.0), 1.0)
+    motion_quantile = float(cfg.get('camera_precompute_motion_quantile', min_fraction))
+    motion_quantile = min(max(motion_quantile, 0.05), 1.0)
+    static_keyframes = max(2, int(cfg.get('camera_static_num_keyframes', 2)))
+
+    dist_range = cfg.get('camera_follow_distance_range', cfg.get('camera_random_distance_range', [4.0, 30.0]))
+    base_min = float(dist_range[0])
+    base_max_cfg = float(dist_range[1])
+    if base_max_cfg < base_min:
+        base_min, base_max_cfg = base_max_cfg, base_min
+
+    elev_range = cfg.get('camera_follow_elevation_deg_range', cfg.get('camera_random_elevation_deg_range', [8.0, 30.0]))
+    elev_min = math.radians(float(elev_range[0]))
+    elev_max = math.radians(float(elev_range[1]))
+    if elev_max < elev_min:
+        elev_min, elev_max = elev_max, elev_min
+
+    target_jitter = cfg.get('camera_follow_target_jitter_xyz', cfg.get('camera_target_jitter_xyz', [0.0, 0.0, 0.0]))
+    jitter_clip = np.array([
+        random.uniform(-float(target_jitter[0]), float(target_jitter[0])),
+        random.uniform(-float(target_jitter[1]), float(target_jitter[1])),
+        random.uniform(-float(target_jitter[2]), float(target_jitter[2])),
+    ], dtype=float)
+
+    def update_view_layer():
+        try:
+            bpy.context.view_layer.update()
+        except Exception:
+            pass
+
+    def bbox_points_world(frame):
+        """Return evaluated world-space mesh bbox corners at a specific frame."""
+        old_frame = scene.frame_current
+        scene.frame_set(int(frame))
+        update_view_layer()
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        pts = []
+        try:
+            for obj in mesh_objs:
+                bpy_obj = obj.blender_obj if hasattr(obj, 'blender_obj') else obj
+                if getattr(bpy_obj, 'type', None) != 'MESH':
+                    continue
+                try:
+                    eval_obj = bpy_obj.evaluated_get(depsgraph)
+                    mw = eval_obj.matrix_world
+                    for corner in eval_obj.bound_box:
+                        p = mw @ Vector(corner)
+                        pts.append([p.x, p.y, p.z])
+                except Exception:
+                    continue
+        finally:
+            scene.frame_set(old_frame)
+            update_view_layer()
+        return np.asarray(pts, dtype=float)
+
+    frame_samples = []
+    centers = []
+    radii = []
+    for frame in sample_frames:
+        track_pt = np.asarray(bone_world_position(mesh_objs, bone_name=bone_name, frame=frame), dtype=float)
+        bbox_pts = bbox_points_world(frame)
+        if bbox_pts.size == 0:
+            bbox_pts = track_pt.reshape(1, 3)
+        bbox_center = np.mean(bbox_pts, axis=0)
+        center = 0.25 * track_pt + 0.75 * bbox_center
+        radius = float(np.max(np.linalg.norm(bbox_pts - center, axis=1))) if len(bbox_pts) else 0.0
+        frame_samples.append((center, bbox_pts))
+        centers.append(center)
+        radii.append(radius)
+
+    centers = np.asarray(centers, dtype=float)
+    radii = np.asarray(radii, dtype=float)
+    if centers.size == 0:
+        centers = np.zeros((1, 3), dtype=float)
+        radii = np.zeros((1,), dtype=float)
+        frame_samples = [(centers[0], centers[0].reshape(1, 3))]
+
+    # Median is more robust than the mean for locomotion clips with a few extreme frames.
+    look_at = np.median(centers, axis=0) + jitter_clip
+    motion_plus_body = np.linalg.norm(centers - look_at, axis=1) + radii
+    target_radius = float(np.quantile(motion_plus_body, motion_quantile)) if len(motion_plus_body) else 0.0
+
+    cam_data = cam_obj.data
+    if cam_data is not None and hasattr(cam_data, 'angle_x') and hasattr(cam_data, 'angle_y'):
+        half_fov = 0.5 * min(float(cam_data.angle_x), float(cam_data.angle_y))
+    else:
+        half_fov = math.radians(25.0)
+    usable_half_fov = max(math.radians(2.0), half_fov * (1.0 - 2.0 * view_margin))
+
+    distance_scale = float(cfg.get('camera_precompute_distance_scale', cfg.get('camera_follow_auto_distance_scale', 1.10)))
+    distance_bias = float(cfg.get('camera_precompute_distance_bias', cfg.get('camera_follow_auto_distance_bias', 0.0)))
+    dist_needed = (target_radius / max(math.tan(usable_half_fov), 1e-4)) if target_radius > 1e-6 else base_min
+    dist_guess = dist_needed * distance_scale + distance_bias
+
+    auto_expand = bool(cfg.get('camera_precompute_auto_expand_distance', True))
+    hard_max = float(cfg.get('camera_precompute_hard_max_distance', 80.0))
+    if auto_expand:
+        base_max = min(max(base_max_cfg, dist_guess * 1.35, base_min + 1.0), hard_max)
+    else:
+        base_max = base_max_cfg
+    dist_guess = min(max(dist_guess, base_min), base_max)
+
+    old_loc = cam_obj.location.copy()
+    old_rot = cam_obj.rotation_euler.copy()
+
+    def visible_fraction_for_pose(cam_pos, cam_euler):
+        cam_obj.location = Vector(cam_pos)
+        cam_obj.rotation_euler = cam_euler
+        update_view_layer()
+        visible_frames = 0
+        for center_pt, bbox_pts in frame_samples:
+            center_co = world_to_camera_view(scene, cam_obj, Vector(center_pt))
+            center_visible = (
+                center_co.z > 0.0 and
+                view_margin <= center_co.x <= 1.0 - view_margin and
+                view_margin <= center_co.y <= 1.0 - view_margin
+            )
+            if not center_visible:
+                continue
+            if bbox_corner_fraction <= 0.0 or len(bbox_pts) == 0:
+                visible_frames += 1
+                continue
+            inside = 0
+            for p in bbox_pts:
+                co = world_to_camera_view(scene, cam_obj, Vector(p))
+                if co.z > 0.0 and view_margin <= co.x <= 1.0 - view_margin and view_margin <= co.y <= 1.0 - view_margin:
+                    inside += 1
+            if (inside / float(len(bbox_pts))) >= bbox_corner_fraction:
+                visible_frames += 1
+        return visible_frames / float(max(1, len(frame_samples)))
+
+    num_candidates = max(1, int(cfg.get('camera_precompute_num_candidates', 128)))
+    dist_count = max(2, int(cfg.get('camera_precompute_distance_tests', 24)))
+    # Test close-to-far distances. Include the analytic guess and max distance explicitly.
+    dist_tests = np.linspace(base_min, base_max, dist_count)
+    dist_tests = np.unique(np.concatenate((dist_tests, [dist_guess, base_max])))
+    dist_tests = sorted(float(d) for d in dist_tests)
+
+    path_delta = centers[-1] - centers[0]
+    path_delta[2] = 0.0
+    candidate_angles = []
+    if np.linalg.norm(path_delta) > 1e-6:
+        # Side views of the motion path often keep running animations visible while staying closer.
+        motion_az = math.atan2(path_delta[1], path_delta[0])
+        candidate_angles += [motion_az + math.pi / 2.0, motion_az - math.pi / 2.0, motion_az + math.pi]
+    candidate_angles += [0.0, math.pi / 2.0, math.pi, -math.pi / 2.0]
+    candidate_angles += [random.uniform(-math.pi, math.pi) for _ in range(num_candidates)]
+
+    candidates = []
+    best_any = None
+    try:
+        for az in candidate_angles:
+            elev = random.uniform(elev_min, elev_max)
+            direction = np.array([
+                math.cos(elev) * math.cos(az),
+                math.cos(elev) * math.sin(az),
+                math.sin(elev),
+            ], dtype=float)
+            direction /= max(np.linalg.norm(direction), 1e-8)
+            for dist in dist_tests:
+                cam_pos = look_at + direction * dist
+                cam_euler = euler_from_look_at(cam_pos.tolist(), look_at.tolist(), np.array([0.0, 0.0, 1.0], dtype=float))
+                frac = visible_fraction_for_pose(cam_pos, cam_euler)
+                record = {
+                    'frac': float(frac),
+                    'dist': float(dist),
+                    'cam_pos': cam_pos.copy(),
+                    'cam_euler': cam_euler,
+                    'az': float(az),
+                    'elev': float(elev),
+                }
+                if best_any is None or (record['frac'], -record['dist']) > (best_any['frac'], -best_any['dist']):
+                    best_any = record
+                if frac >= min_fraction:
+                    candidates.append(record)
+                    break
+    finally:
+        cam_obj.location = old_loc
+        cam_obj.rotation_euler = old_rot
+        update_view_layer()
+
+    if candidates:
+        # Pick the closest valid camera. This keeps the person large while satisfying coverage.
+        best = min(candidates, key=lambda c: (c['dist'], abs(c['frac'] - min_fraction)))
+        status = 'valid'
+    else:
+        best = best_any
+        status = 'fallback_best_available'
+
+    if best is None:
+        cam_pos = look_at + np.array([0.0, -base_max, max(1.0, 0.25 * base_max)], dtype=float)
+        cam_euler = euler_from_look_at(cam_pos.tolist(), look_at.tolist(), np.array([0.0, 0.0, 1.0], dtype=float))
+        best = {'frac': 0.0, 'dist': float(np.linalg.norm(cam_pos - look_at)), 'cam_pos': cam_pos, 'cam_euler': cam_euler}
+        status = 'emergency_fallback'
+
+    print(
+        f"[static_camera] status={status} visible_fraction={best['frac']:.3f} "
+        f"distance={best['dist']:.3f} requested_fraction={min_fraction:.3f} "
+        f"target_radius={target_radius:.3f} distance_range=[{base_min:.3f}, {base_max:.3f}] "
+        f"samples={len(frame_samples)}"
+    )
+
+    cam_obj.location = Vector(best['cam_pos'])
+    cam_obj.rotation_euler = best['cam_euler']
+    update_view_layer()
+
+    one_pose = [best['cam_pos'].tolist(), best['cam_euler']]
+    cam_pose = [[list(one_pose[0]), one_pose[1]] for _ in range(static_keyframes)]
+    return cam_pose, [p.tolist() for p in centers]
+
+def randomize_camera_around_target(target_world, cfg, target_forward=None):
+    """Place static camera at random spherical offset and look near target."""
+    scene = bpy.context.scene
+    cam_obj = scene.camera
+    if cam_obj is None:
+        return None, None
+
+    dist_min, dist_max = cfg.get('camera_random_distance_range', [6.0, 12.0])
+    elev_deg_min, elev_deg_max = cfg.get('camera_random_elevation_deg_range', [10.0, 45.0])
+    jitter_xyz = cfg.get('camera_target_jitter_xyz', [0.5, 0.5, 0.2])
+
+    dist = random.uniform(float(dist_min), float(dist_max))
+    elev = math.radians(random.uniform(float(elev_deg_min), float(elev_deg_max)))
+
+    up = np.array([0.0, 0.0, 1.0], dtype=float)
+    # Unbiased horizontal sampling: uniform azimuth around subject in world XY.
+    azimuth = random.uniform(-math.pi, math.pi)
+    horiz_dir = np.array([math.cos(azimuth), math.sin(azimuth), 0.0], dtype=float)
+
+    dx = dist * math.cos(elev) * horiz_dir[0]
+    dy = dist * math.cos(elev) * horiz_dir[1]
+    dz = dist * math.sin(elev)
+
+    cam_pos = np.asarray(target_world, dtype=float) + np.array([dx, dy, dz], dtype=float)
+    look_jitter = np.array([
+        random.uniform(-float(jitter_xyz[0]), float(jitter_xyz[0])),
+        random.uniform(-float(jitter_xyz[1]), float(jitter_xyz[1])),
+        random.uniform(-float(jitter_xyz[2]), float(jitter_xyz[2])),
+    ], dtype=float)
+    look_at = np.asarray(target_world, dtype=float) + look_jitter
+
+    cam_obj.location = cam_pos
+    cam_obj.rotation_euler = euler_from_look_at(cam_pos, look_at, up)
+    return cam_pos, look_at
+
+
+def shift_armature_actions(mesh_objs, frame_offset):
+    """Shift armature action keyframes in time so rendered frame 0 starts at frame_offset."""
+    shifted = set()
+    armatures = []
+    for obj in mesh_objs:
+        bpy_obj = obj.blender_obj if hasattr(obj, 'blender_obj') else obj
+        parent = getattr(bpy_obj, 'parent', None)
+        if parent is not None and parent.type == 'ARMATURE':
+            armatures.append(parent)
+    for arm in armatures:
+        if arm.name in shifted:
+            continue
+        if arm.animation_data is None or arm.animation_data.action is None:
+            continue
+        action = arm.animation_data.action
+        for fcu in action.fcurves:
+            for kf in fcu.keyframe_points:
+                kf.co.x -= float(frame_offset)
+                kf.handle_left.x -= float(frame_offset)
+                kf.handle_right.x -= float(frame_offset)
+            fcu.update()
+        shifted.add(arm.name)
 
 def make_action_cyclic(action):
     """Add cyclic modifiers so an action loops for the full render duration."""
@@ -656,7 +1055,26 @@ def setup_fill_light(cam_position, look_at):
     look_at = np.array(look_at, dtype=float)
     mode = config.get('fill_light_position_mode', 'camera_offset')
 
-    if mode == 'cube_random':
+    if config.get('camera_locked_background', False):
+        view_dir = look_at - cam_position
+        view_norm = np.linalg.norm(view_dir)
+        if view_norm < 1e-6:
+            view_dir = np.array([0.0, 1.0, 0.0], dtype=float)
+            view_norm = 1.0
+        else:
+            view_dir = view_dir / view_norm
+
+        bg_plane_distance = 300.0
+        # Place light close to the subject (slightly toward camera) for stable foreground illumination.
+        subject_backoff = 1.5
+        pos_candidate = look_at - view_dir * subject_backoff
+        proj = float(np.dot(pos_candidate - cam_position, view_dir))
+        proj = min(max(proj, 2.0), bg_plane_distance * 0.7)
+        pos = cam_position + view_dir * proj + np.array([0.0, 0.0, height], dtype=float)
+
+        # Without world/HDR lighting, area lights need substantially higher energy.
+        energy = max(float(energy), 2500.0)
+    elif mode == 'cube_random':
         cube_extent = float(config.get('camera_cube_extent', 25.0))
         full_cube_z = bool(config.get('fill_light_cube_full_z', True))
         min_sep = float(config.get('fill_light_cube_min_separation', 3.0))
@@ -1010,18 +1428,177 @@ def setup_camera_intrinsic():
     width, height = config['image_width'], config['image_height']
     bproc.camera.set_resolution(width, height)
 
+
+def get_solid_background_color():
+    global config
+    cached_color = config.get('_sampled_solid_background_color')
+    if cached_color is not None:
+        return cached_color
+
+    randomize_solid_background = config.get('randomize_solid_background', False)
+    if randomize_solid_background:
+        gray_min, gray_max = config.get('solid_background_gray_range', [0.2, 0.8])
+        gray = random.uniform(float(gray_min), float(gray_max))
+        color = [gray, gray, gray]
+    else:
+        color = config.get('solid_background_color', [0.5, 0.5, 0.5])
+
+    config['_sampled_solid_background_color'] = [float(color[0]), float(color[1]), float(color[2])]
+    return config['_sampled_solid_background_color']
+
+
+def get_sampled_hdri_path():
+    global config
+    cached_path = config.get('_sampled_hdri_path')
+    if cached_path is not None:
+        return cached_path
+
+    hdr_dir = config['hdr_dir']
+    hdr_folders = [f for f in os.listdir(hdr_dir) if os.path.isdir(os.path.join(hdr_dir, f))]
+    if not hdr_folders:
+        print(f"Warning: No HDRI folders found in {hdr_dir}")
+        return None
+
+    hdr_folder = random.choice(hdr_folders)
+    hdr_folder_path = os.path.join(hdr_dir, hdr_folder)
+    hdr_files = [f for f in os.listdir(hdr_folder_path) if f.lower().endswith('.hdr')]
+    if not hdr_files:
+        print(f"Warning: No .hdr file found in {hdr_folder_path}")
+        return None
+
+    path = os.path.join(hdr_folder_path, hdr_files[0])
+    config['_sampled_hdri_path'] = path
+    return path
+
+
+def set_plane_uv_region(mesh, u0=0.0, v0=0.0, u1=1.0, v1=1.0):
+    # Keep UV assignment explicit so the camera-locked image can use centered crop when needed.
+    uv_layer = mesh.uv_layers.get('UVMap')
+    if uv_layer is None:
+        uv_layer = mesh.uv_layers.new(name='UVMap')
+
+    uv_coords = [
+        (u0, v0),
+        (u1, v0),
+        (u1, v1),
+        (u0, v1),
+    ]
+    for loop_idx, loop in enumerate(mesh.loops):
+        vert_idx = loop.vertex_index
+        uv_layer.data[loop_idx].uv = uv_coords[vert_idx]
+
+
+def setup_camera_locked_background():
+    global config
+    if not config.get('camera_locked_background', False):
+        return
+
+    scene = bpy.context.scene
+    cam_obj = scene.camera
+    if cam_obj is None:
+        print('Warning: camera_locked_background is enabled but no camera exists.')
+        return
+
+    width = float(config.get('image_width', 320))
+    height = float(config.get('image_height', 320))
+    aspect = width / max(height, 1.0)
+    # Keep the locked HDRI safely behind subject motion while overfilling the frame.
+    distance = 300.0
+    margin = 3.0
+
+    cam_data = cam_obj.data
+    if cam_data.type == 'ORTHO':
+        half_h = float(cam_data.ortho_scale) * 0.5
+        half_w = half_h * aspect
+    else:
+        # Use both camera FOV axes directly so plane coverage matches Blender camera projection.
+        fov_x = float(cam_data.angle_x)
+        fov_y = float(cam_data.angle_y)
+        half_w = distance * math.tan(fov_x * 0.5)
+        half_h = distance * math.tan(fov_y * 0.5)
+
+    half_w *= margin
+    half_h *= margin
+
+    mesh = bpy.data.meshes.new('CameraLockedBackgroundMesh')
+    bg_plane = bpy.data.objects.new('CameraLockedBackground', mesh)
+    scene.collection.objects.link(bg_plane)
+
+    verts = [
+        (-half_w, -half_h, -distance),
+        (half_w, -half_h, -distance),
+        (half_w, half_h, -distance),
+        (-half_w, half_h, -distance),
+    ]
+    faces = [(0, 1, 2, 3)]
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+
+    # Default UVs; may be replaced by centered crop for HDRI aspect preservation.
+    set_plane_uv_region(mesh)
+
+    bg_plane.parent = cam_obj
+    bg_plane.matrix_parent_inverse = cam_obj.matrix_world.inverted()
+
+    bg_mat = bpy.data.materials.new('CameraLockedBackgroundMat')
+    bg_mat.use_nodes = True
+    nodes = bg_mat.node_tree.nodes
+    links = bg_mat.node_tree.links
+    nodes.clear()
+
+    emission = nodes.new(type='ShaderNodeEmission')
+    output = nodes.new(type='ShaderNodeOutputMaterial')
+    source = str(config.get('camera_locked_background_source', 'solid')).lower()
+    if source == 'hdri':
+        hdr_path = get_sampled_hdri_path()
+        if hdr_path is None:
+            raise RuntimeError(
+                "camera_locked_background_source='hdri' is enabled but no HDRI was found under hdr_dir"
+            )
+
+        tex_coord = nodes.new(type='ShaderNodeTexCoord')
+        tex_img = nodes.new(type='ShaderNodeTexImage')
+        tex_img.image = bpy.data.images.load(hdr_path, check_existing=True)
+        tex_img.projection = 'FLAT'
+        tex_img.extension = 'EXTEND'
+        links.new(tex_coord.outputs['UV'], tex_img.inputs['Vector'])
+        links.new(tex_img.outputs['Color'], emission.inputs['Color'])
+
+        # Center-crop UVs to preserve image aspect in output frame (avoids panoramic squeeze/warping).
+        img_w = float(max(tex_img.image.size[0], 1))
+        img_h = float(max(tex_img.image.size[1], 1))
+        img_aspect = img_w / img_h
+        out_aspect = width / max(height, 1.0)
+
+        if img_aspect > out_aspect:
+            u_span = out_aspect / img_aspect
+            u0 = 0.5 - 0.5 * u_span
+            u1 = 0.5 + 0.5 * u_span
+            set_plane_uv_region(mesh, u0=u0, v0=0.0, u1=u1, v1=1.0)
+        elif img_aspect < out_aspect:
+            v_span = img_aspect / out_aspect
+            v0 = 0.5 - 0.5 * v_span
+            v1 = 0.5 + 0.5 * v_span
+            set_plane_uv_region(mesh, u0=0.0, v0=v0, u1=1.0, v1=v1)
+    else:
+        color = get_solid_background_color()
+        emission.inputs['Color'].default_value = (float(color[0]), float(color[1]), float(color[2]), 1.0)
+    emission.inputs['Strength'].default_value = float(config.get('solid_background_strength', 1.0))
+    links.new(emission.outputs['Emission'], output.inputs['Surface'])
+
+    bg_plane.data.materials.append(bg_mat)
+
 def setup_envmap():
     global config
+    camera_locked_bg_hdri = (
+        config.get('camera_locked_background', False)
+        and str(config.get('camera_locked_background_source', 'solid')).lower() == 'hdri'
+    )
     use_solid_background = config.get('use_solid_background', False)
-    if use_solid_background:
+    # If camera-locked HDRI is enabled, keep world HDRI too so borders never fall back to monochrome.
+    if use_solid_background and not camera_locked_bg_hdri:
         # Configure Blender world nodes for a flat monochrome background.
-        randomize_solid_background = config.get('randomize_solid_background', False)
-        if randomize_solid_background:
-            gray_min, gray_max = config.get('solid_background_gray_range', [0.2, 0.8])
-            gray = random.uniform(float(gray_min), float(gray_max))
-            color = [gray, gray, gray]
-        else:
-            color = config.get('solid_background_color', [0.5, 0.5, 0.5])
+        color = get_solid_background_color()
         strength = float(config.get('solid_background_strength', 1.0))
 
         # Ensure world exists and uses nodes.
@@ -1052,20 +1629,9 @@ def setup_envmap():
             links.new(bg_node.outputs['Background'], output_node.inputs['Surface'])
         return
 
-    hdr_dir = config['hdr_dir']
-    hdr_folders = [f for f in os.listdir(hdr_dir) if os.path.isdir(os.path.join(hdr_dir, f))]
-    hdr_folder = random.choice(hdr_folders)
-    # hdr_folder = "autumn_forest_01"  # For testing
-    
-    # Find the actual .hdr file in the folder
-    hdr_folder_path = os.path.join(hdr_dir, hdr_folder)
-    hdr_files = [f for f in os.listdir(hdr_folder_path) if f.endswith('.hdr')]
-    if hdr_files:
-        hdr_file = hdr_files[0]  # Take the first .hdr file
-        path = os.path.join(hdr_folder_path, hdr_file)
+    path = get_sampled_hdri_path()
+    if path is not None:
         bproc.world.set_world_background_hdr_img(path)
-    else:
-        print(f"Warning: No .hdr file found in {hdr_folder_path}")
 
 def setup_human_env(mode):
     """
@@ -1080,12 +1646,14 @@ def setup_human_env(mode):
     
     # Set camera clipping to avoid near-plane clipping
     bpy.context.scene.camera.data.clip_start = 0.1
-    bpy.context.scene.camera.data.clip_end = 100.0
+    bpy.context.scene.camera.data.clip_end = 1000.0
     
     up = [0, 0, 1]
     
     # Setup environment map for lighting
     setup_envmap()
+    # Optional camera-attached background that stays static in image space.
+    setup_camera_locked_background()
     
     # Load human model and animation
     human_model_dir = config.get('human_model_dir', 'data/human_models')
@@ -1176,82 +1744,98 @@ def setup_human_env(mode):
     follow_enabled = config.get('camera_follow_enabled', False)
 
     if follow_enabled and num_keyframes >= 2:
+        # Reset tracking to a simple robust model-follow camera:
+        # sample one random offset around hips, keep that offset over time, always look at hips.
         target_bone = config.get('camera_target_bone', 'Hips')
-        rotation_only = config.get('camera_follow_rotation_only', True)
-        follow_distance = float(config.get('camera_follow_distance', 8.0))
-        follow_height_offset = float(config.get('camera_follow_height_offset', 2.0))
-        inertia = float(config.get('camera_follow_inertia', 0.85))
-        inertia = min(max(inertia, 0.0), 0.99)
+        dist_range = config.get('camera_follow_distance_range', [3.5, 7.5])
+        elev_range = config.get('camera_follow_elevation_deg_range', [8.0, 30.0])
+        target_jitter = config.get('camera_follow_target_jitter_xyz', [0.15, 0.15, 0.10])
+        pos_inertia = float(config.get('camera_follow_position_inertia', 0.35))
+        pos_inertia = min(max(pos_inertia, 0.0), 0.99)
+        rot_inertia = float(config.get('camera_follow_rotation_inertia', 0.88))
+        rot_inertia = min(max(rot_inertia, 0.0), 0.99)
+        track_gain = float(config.get('camera_follow_track_gain', 0.35))
+        track_gain = min(max(track_gain, 0.0), 1.0)
+        motion_ramp_ratio = float(config.get('camera_follow_motion_ramp_ratio', 0.25))
+        motion_ramp_ratio = min(max(motion_ramp_ratio, 0.0), 1.0)
+        motion_coverage = float(config.get('camera_follow_motion_coverage', 0.70))
+        motion_coverage = min(max(motion_coverage, 0.25), 0.95)
+        auto_dist_scale = float(config.get('camera_follow_auto_distance_scale', 1.20))
+        auto_dist_bias = float(config.get('camera_follow_auto_distance_bias', 0.75))
 
         anim_start = float(config.get('anim_frame_start', 0.0))
         anim_len = float(config.get('anim_frame_length', max(1, num_keyframes)))
-        sample_frames = np.linspace(anim_start, anim_start + max(1.0, anim_len - 1.0), num_keyframes)
+        rgb_fps = float(config.get('rgb_image_fps', 30.0))
+        rendered_anim_frames = float(max(1.0, round(rgb_fps * float(config.get('duration', 1.0)))))
+        sample_anim_span = min(anim_len, rendered_anim_frames)
+        default_follow_kf = max(int(num_keyframes), min(24, int(max(2.0, sample_anim_span))))
+        follow_kf = int(config.get('camera_follow_num_keyframes', default_follow_kf))
+        follow_kf = max(2, min(follow_kf, int(max(2.0, sample_anim_span))))
+        sample_frames = np.linspace(anim_start, anim_start + max(1.0, sample_anim_span - 1.0), follow_kf)
 
         hip_points = [bone_world_position(human_objs, bone_name=target_bone, frame=f) for f in sample_frames]
 
-        cam_pose = []
-        if rotation_only:
-            # Keep camera fixed in place and only rotate to track hips with inertia.
-            cam_fixed = np.array(cam_position, dtype=float)
-            edge_track = bool(config.get('camera_follow_edge_tracking', True))
-            edge_margin = float(config.get('camera_follow_edge_margin', 0.15))
-            min_target_shift = float(config.get('camera_follow_min_target_shift', 0.10))
-            cam_obj = bpy.context.scene.camera
-            target_prev = np.array(hip_points[0], dtype=float)
-            hip_prev_raw = np.array(hip_points[0], dtype=float)
-            first_target = target_prev + np.array([0.0, 0.0, follow_height_offset], dtype=float)
-            current_euler = euler_from_look_at(cam_fixed.tolist(), first_target.tolist(), up)
-            for i in range(num_keyframes):
-                hip_raw = np.array(hip_points[i], dtype=float)
-                hip = hip_raw + np.array([0.0, 0.0, follow_height_offset], dtype=float)
-                should_track = True
-                if edge_track and cam_obj is not None:
-                    near_edge = target_near_edge(
-                        cam_obj,
-                        hip_raw.tolist(),
-                        cam_fixed.tolist(),
-                        current_euler,
-                        edge_margin=edge_margin,
-                    )
-                    moved_enough = np.linalg.norm(hip_raw - hip_prev_raw) >= min_target_shift
-                    should_track = near_edge and moved_enough
+        # Precompute trajectory center/spread so camera is placed to see most of the motion.
+        hips_arr = np.asarray(hip_points, dtype=float)
+        traj_center = np.mean(hips_arr, axis=0)
+        rel = hips_arr - traj_center
+        traj_radius = float(np.max(np.linalg.norm(rel, axis=1)))
 
-                if should_track:
-                    target_smooth = inertia * target_prev + (1.0 - inertia) * hip
-                    cam_euler_curr = euler_from_look_at(cam_fixed.tolist(), target_smooth.tolist(), up)
-                else:
-                    # Keep pan/tilt fixed while subject remains comfortably inside frame.
-                    target_smooth = target_prev
-                    cam_euler_curr = current_euler
-
-                cam_pose.append([cam_fixed.tolist(), cam_euler_curr])
-                target_prev = target_smooth
-                hip_prev_raw = hip_raw
-                current_euler = cam_euler_curr
+        cam_data = bpy.context.scene.camera.data if bpy.context.scene.camera is not None else None
+        if cam_data is not None and hasattr(cam_data, 'angle_x') and hasattr(cam_data, 'angle_y'):
+            half_fov = 0.5 * min(float(cam_data.angle_x), float(cam_data.angle_y))
         else:
-            # Optional full follow mode: move behind motion direction with inertia.
-            cam_prev = np.array(cam_position, dtype=float)
-            last_dir = None
-            for i in range(num_keyframes):
-                hip = np.array(hip_points[i], dtype=float)
-                if i < num_keyframes - 1:
-                    d = np.array(hip_points[i + 1], dtype=float) - hip
-                else:
-                    d = hip - np.array(hip_points[i - 1], dtype=float)
+            half_fov = math.radians(25.0)
+        base_min = float(dist_range[0])
+        base_max = float(dist_range[1])
+        eff_half_fov = max(math.radians(5.0), half_fov * motion_coverage)
+        dist_needed = (traj_radius / max(math.tan(eff_half_fov), 1e-4)) if traj_radius > 1e-6 else 0.0
+        auto_dist = dist_needed * auto_dist_scale + auto_dist_bias
 
-                d_xy = np.array([d[0], d[1], 0.0], dtype=float)
-                d_norm = np.linalg.norm(d_xy)
-                if d_norm > 1e-6:
-                    move_dir = d_xy / d_norm
-                    last_dir = move_dir
-                else:
-                    move_dir = last_dir if last_dir is not None else np.array([0.0, 1.0, 0.0], dtype=float)
+        # Keep auto distance as an in-range bias target, not an unbounded override.
+        dist_center = min(max(auto_dist, base_min), base_max)
+        band_ratio = float(config.get('camera_follow_distance_center_band_ratio', 0.25))
+        band_ratio = min(max(band_ratio, 0.0), 1.0)
+        half_band = 0.5 * band_ratio * max(base_max - base_min, 1e-3)
+        dist_min_eff = max(base_min, dist_center - half_band)
+        dist_max_eff = min(base_max, dist_center + half_band)
+        if dist_max_eff <= dist_min_eff:
+            dist = dist_center
+        else:
+            dist = random.uniform(dist_min_eff, dist_max_eff)
+        elev = math.radians(random.uniform(float(elev_range[0]), float(elev_range[1])))
+        az = random.uniform(-math.pi, math.pi)
+        offset = np.array([
+            dist * math.cos(elev) * math.cos(az),
+            dist * math.cos(elev) * math.sin(az),
+            dist * math.sin(elev),
+        ], dtype=float)
 
-                desired = hip - move_dir * follow_distance + np.array([0.0, 0.0, follow_height_offset], dtype=float)
-                cam_curr = inertia * cam_prev + (1.0 - inertia) * desired
-                cam_euler_curr = euler_from_look_at(cam_curr.tolist(), hip.tolist(), up)
-                cam_pose.append([cam_curr.tolist(), cam_euler_curr])
-                cam_prev = cam_curr
+        cam_pose = []
+        hip0 = np.asarray(hip_points[0], dtype=float)
+        cam_anchor = hip0 + offset
+        cam_prev = cam_anchor.copy()
+        up_vec = np.array([0.0, 0.0, 1.0], dtype=float)
+        # Keep a fixed per-clip jitter so look-at is stable and does not jump every frame.
+        jitter_clip = np.array([
+            random.uniform(-float(target_jitter[0]), float(target_jitter[0])),
+            random.uniform(-float(target_jitter[1]), float(target_jitter[1])),
+            random.uniform(-float(target_jitter[2]), float(target_jitter[2])),
+        ], dtype=float)
+        look_prev = hip0 + jitter_clip
+        ramp_frames = max(1, int(round(float(follow_kf) * motion_ramp_ratio)))
+        for i, hip_raw in enumerate(hip_points):
+            hip = np.asarray(hip_raw, dtype=float)
+            # Follow local hips displacement from the first frame, with a gradual ramp-in.
+            ramp = min(1.0, float(i + 1) / float(ramp_frames))
+            desired_cam = cam_anchor + (hip - hip0) * (track_gain * ramp)
+            cam_curr = pos_inertia * cam_prev + (1.0 - pos_inertia) * desired_cam
+            look_target_nominal = hip + jitter_clip
+            look_target = rot_inertia * look_prev + (1.0 - rot_inertia) * look_target_nominal
+            cam_euler = euler_from_look_at(cam_curr.tolist(), look_target.tolist(), up_vec)
+            cam_pose.append([cam_curr.tolist(), cam_euler])
+            cam_prev = cam_curr
+            look_prev = look_target
 
         # Set camera to first pose for debug .blend visibility
         if bpy.context.scene.camera:
@@ -1292,16 +1876,19 @@ def setup_human_env(mode):
         # Add camera-based fill to brighten foreground near the camera
         setup_fill_light(cam_position, look_at)
 
+    effective_num_keyframes = max(2, len(cam_pose))
+
     # Human objects stay in place (skeletal animation handles movement)
     # But we need to provide poses for each keyframe for the animation system
     # Each human object gets the same pose repeated for each keyframe
     human_pose = [[0, 0, 0], [0, 0, 0]]  # Position and rotation (already applied to the object)
-    human_poses = [[human_pose] * num_keyframes for _ in human_objs]
+    human_poses = [[human_pose] * effective_num_keyframes for _ in human_objs]
     
     setup_info = {
         'cam_pose': cam_pose,
         'dynamic_objs': human_objs,
         'dyna_objs_pose': human_poses,
+        'num_keyframes_override': effective_num_keyframes,
     }
     
     return setup_info
@@ -1372,20 +1959,227 @@ def main():
         bpy.ops.wm.save_as_mainfile(filepath=blend_path, copy=True)
         print(f"Saved .blend file to {blend_path}")
 
-    ########### first pass, render motion blur ########### 
-    rgb_fps = config['rgb_image_fps']
-    rgb_frames = int(round(rgb_fps * config['duration']))  # exact count
+    ########### visibility-driven clip selection ###########
+    rgb_fps = int(config['rgb_image_fps'])
+    event_fps = int(config['event_image_fps'])
+    desired_rgb_frames = int(round(float(config['duration']) * float(rgb_fps)))
+    # Initialize defensively so downstream code always has defined frame counts.
+    rgb_frames = max(1, desired_rgb_frames)
+    event_frames = max(1, int(round(float(rgb_frames) * float(event_fps) / float(rgb_fps))))
+    min_clip_sec = float(config.get('min_visible_clip_sec', 0.5))
+    min_visible_rgb_frames = max(1, int(round(min_clip_sec * float(rgb_fps))))
+    vis_margin = float(config.get('camera_visibility_margin', 0.05))
+    camera_attempts = int(config.get('camera_visibility_attempts', 12))
+    post_exit_tail_frames = max(0, int(config.get('camera_post_exit_tail_frames', 3)))
+    reentry_grace_frames = max(0, int(config.get('camera_reentry_grace_frames', 0)))
+    target_bone = config.get('camera_target_bone', 'Hips')
+    center_fallback = bool(config.get('camera_use_model_center_visibility_fallback', True))
+    follow_enabled_cfg = bool(config.get('camera_follow_enabled', False))
+
+    if use_humans and len(setup_info.get('dynamic_objs', [])) > 0:
+        anim_start = int(round(float(config.get('anim_frame_start', 0.0))))
+        anim_len = int(round(float(config.get('anim_frame_length', desired_rgb_frames))))
+        anim_len = max(1, anim_len)
+
+        # Random start: between clip start and halfway, while preserving minimum clip length when possible.
+        max_start_offset_any = max(0, anim_len - 1)
+        halfway_offset = max(0, int(max_start_offset_any // 2))
+        max_start_keep_min = max(0, anim_len - min_visible_rgb_frames)
+        allowed_max_start_offset = min(halfway_offset, max_start_keep_min)
+        start_offset = random.randint(0, allowed_max_start_offset)
+        source_start_frame = anim_start + start_offset
+
+        # Shift action time so frame 0 corresponds to a random source frame.
+        shift_armature_actions(setup_info['dynamic_objs'], source_start_frame)
+
+        max_candidate_rgb_frames = min(desired_rgb_frames, anim_len - start_offset)
+        max_candidate_rgb_frames = max(1, int(max_candidate_rgb_frames))
+
+        # In follow mode, trim clip using visibility along the actual follow camera trajectory.
+        if follow_enabled_cfg:
+            cam_obj = bpy.context.scene.camera
+            follow_track_bone, follow_track_part = select_camera_tracking_bone(
+                setup_info['dynamic_objs'],
+                config,
+                default_bone=target_bone,
+            )
+            cam_path, _ = build_follow_cam_pose_from_hips(
+                setup_info['dynamic_objs'],
+                config,
+                max_candidate_rgb_frames,
+                bone_name=follow_track_bone,
+            )
+            # Use hips-keyed camera path directly so camera keyframes are synchronized with subject motion.
+            setup_info['cam_pose'] = cam_path
+            setup_info['num_keyframes_override'] = max(2, len(cam_path))
+            config['sampled_camera_track_part'] = str(follow_track_part)
+            config['sampled_camera_track_bone'] = str(follow_track_bone)
+            if cam_obj is not None and len(cam_path) > 0:
+                cam_obj.location = cam_path[0][0]
+                cam_obj.rotation_euler = cam_path[0][1]
+
+            visible_len = 0
+            miss_streak = 0
+            streak_start = None
+            first_exit_frame = None
+
+            if cam_obj is not None and len(cam_path) > 0:
+                old_loc = cam_obj.location.copy()
+                old_rot = cam_obj.rotation_euler.copy()
+                try:
+                    for fidx in range(max_candidate_rgb_frames):
+                        if len(cam_path) == 1 or max_candidate_rgb_frames <= 1:
+                            pose_idx = 0
+                        else:
+                            pose_idx = int(round(float(fidx) * float(len(cam_path) - 1) / float(max_candidate_rgb_frames - 1)))
+                            pose_idx = max(0, min(pose_idx, len(cam_path) - 1))
+
+                        cam_obj.location = cam_path[pose_idx][0]
+                        cam_obj.rotation_euler = cam_path[pose_idx][1]
+
+                        if subject_visible_in_active_camera(
+                            setup_info['dynamic_objs'],
+                            bone_name=target_bone,
+                            frame=fidx,
+                            margin=vis_margin,
+                            center_fallback=center_fallback,
+                        ):
+                            visible_len += 1
+                            miss_streak = 0
+                            streak_start = None
+                        else:
+                            if miss_streak == 0:
+                                streak_start = fidx
+                            miss_streak += 1
+                            if miss_streak > reentry_grace_frames:
+                                first_exit_frame = streak_start
+                                break
+                finally:
+                    cam_obj.location = old_loc
+                    cam_obj.rotation_euler = old_rot
+
+            if bool(config.get('camera_static_precompute_no_trim', True)):
+                if first_exit_frame is not None:
+                    print(
+                        f"[static_camera] visibility check would have trimmed at frame {first_exit_frame}; "
+                        "keeping the full candidate clip because camera_static_precompute_no_trim=True"
+                    )
+                first_exit_frame = None
+
+            if first_exit_frame is None:
+                clip_len = max_candidate_rgb_frames
+            else:
+                clip_len = min(max_candidate_rgb_frames, first_exit_frame + 1 + post_exit_tail_frames)
+
+            rgb_frames = max(1, int(clip_len))
+            config['sampled_animation_start_frame'] = int(source_start_frame)
+        else:
+            # Use hips trajectory over the candidate clip to place cameras around where the subject actually moves.
+            traj_center = hips_trajectory_center(
+                setup_info['dynamic_objs'],
+                bone_name=target_bone,
+                total_frames=max_candidate_rgb_frames,
+                max_samples=30,
+            )
+
+            valid_candidates = []
+            all_candidates = []
+            cam_obj = bpy.context.scene.camera
+
+            for _ in range(max(1, camera_attempts)):
+                randomize_camera_around_target(traj_center, config)
+
+                visible_len = 0
+                miss_streak = 0
+                streak_start = None
+                first_exit_frame = None
+                for fidx in range(max_candidate_rgb_frames):
+                    if subject_visible_in_active_camera(
+                        setup_info['dynamic_objs'],
+                        bone_name=target_bone,
+                        frame=fidx,
+                        margin=vis_margin,
+                        center_fallback=center_fallback,
+                    ):
+                        visible_len += 1
+                        miss_streak = 0
+                        streak_start = None
+                    else:
+                        if miss_streak == 0:
+                            streak_start = fidx
+                        miss_streak += 1
+                        # End only when out-of-frame streak exceeds grace; re-entry resets the timer.
+                        if miss_streak > reentry_grace_frames:
+                            first_exit_frame = streak_start
+                            break
+
+                if first_exit_frame is None:
+                    clip_len = max_candidate_rgb_frames
+                else:
+                    # Keep a short temporal tail even after subject exits the frame.
+                    clip_len = min(max_candidate_rgb_frames, first_exit_frame + 1 + post_exit_tail_frames)
+
+                if cam_obj is not None:
+                    cand = (cam_obj.location.copy(), cam_obj.rotation_euler.copy(), int(max(1, clip_len)), int(visible_len))
+                    all_candidates.append(cand)
+                    if visible_len >= min_visible_rgb_frames:
+                        valid_candidates.append(cand)
+
+            chosen = None
+            if len(valid_candidates) > 0:
+                chosen = random.choice(valid_candidates)
+            elif len(all_candidates) > 0:
+                # If none meet minimum visibility, pick the best attempted view instead of a random one.
+                chosen = max(all_candidates, key=lambda c: (c[3], c[2]))
+
+            if cam_obj is not None and chosen is not None:
+                cam_obj.location = chosen[0]
+                cam_obj.rotation_euler = chosen[1]
+                rgb_frames = max(1, int(chosen[2]))
+
+                # Strict safety: if frame-0 subject is still not visible, recenter camera to look directly at hips.
+                if not subject_visible_in_active_camera(
+                    setup_info['dynamic_objs'],
+                    bone_name=target_bone,
+                    frame=0,
+                    margin=vis_margin,
+                    center_fallback=center_fallback,
+                ):
+                    hip0 = bone_world_position(setup_info['dynamic_objs'], bone_name=target_bone, frame=0)
+                    dist_min, dist_max = config.get('camera_random_distance_range', [6.0, 12.0])
+                    elev_min, elev_max = config.get('camera_random_elevation_deg_range', [10.0, 45.0])
+                    dist = 0.5 * (float(dist_min) + float(dist_max))
+                    elev = math.radians(0.5 * (float(elev_min) + float(elev_max)))
+                    az = random.uniform(-math.pi, math.pi)
+                    cam_pos = np.asarray(hip0, dtype=float) + np.array([
+                        dist * math.cos(elev) * math.cos(az),
+                        dist * math.cos(elev) * math.sin(az),
+                        dist * math.sin(elev),
+                    ], dtype=float)
+                    cam_obj.location = cam_pos
+                    cam_obj.rotation_euler = euler_from_look_at(cam_pos, hip0, np.array([0.0, 0.0, 1.0], dtype=float))
+            else:
+                rgb_frames = max(1, min_visible_rgb_frames)
+        config['sampled_animation_start_frame'] = int(source_start_frame)
+    else:
+        rgb_frames = max(1, desired_rgb_frames)
+
+    event_frames = max(1, int(round(float(rgb_frames) * float(event_fps) / float(rgb_fps))))
+
+    render_num_kf = int(setup_info.get('num_keyframes_override', config['num_keyframes']))
+
+    ########### first pass, render motion blur ###########
     bpy.context.scene.render.fps = rgb_fps
+    # Always re-apply animation for first pass (reference FPS)
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
         'num_frame': rgb_frames,
-        'num_keyframes': config['num_keyframes'],
+        'num_keyframes': render_num_kf,
     })
     bpy.context.scene.render.frame_map_old = 1
     bpy.context.scene.render.frame_map_new = 1
     bpy.context.scene.frame_start = 0
-    # Exclusive end so we render exactly rgb_frames frames if renderer iterates range(frame_start, frame_end)
-    bpy.context.scene.frame_end = rgb_frames
+    bpy.context.scene.frame_end = int(rgb_frames)
 
     # Enable GPU rendering if available and configured
     use_gpu = config.get('use_gpu', True)
@@ -1460,16 +2254,15 @@ def main():
     ########### second pass, render clean image for event simulation ###########
     # rgb_reference: Low FPS (rgb_image_fps) motion-blurred frames for reference video & optical flow
     # rgb_event_input: High FPS (event_image_fps) clean HDR frames for event camera simulation 
-    event_fps = config['event_image_fps']
-    event_frames = int(round(event_fps * config['duration']))  # exact count
     bpy.context.scene.render.fps = event_fps
 
+    # Always re-apply and stretch animation for event input pass (high FPS)
     animation(output_dir, setup_info, {
         'animation_mode': config['animation_mode'],
         'num_frame': event_frames,
-        'num_keyframes': config['num_keyframes'],
+        'num_keyframes': render_num_kf,
     })
-    
+
     # Scale skeletal animation keyframes to match the new frame range
     # This ensures the FBX animation plays through the same motion over event_frames as it did over rgb_frames
     scale_factor = float(event_frames) / float(rgb_frames)
@@ -1482,7 +2275,7 @@ def main():
                     kf.handle_left.x *= scale_factor
                     kf.handle_right.x *= scale_factor
                 fcu.update()
-    
+
     bpy.context.scene.render.frame_map_old = 1
     bpy.context.scene.render.frame_map_new = 1
     bpy.context.scene.frame_start = 0

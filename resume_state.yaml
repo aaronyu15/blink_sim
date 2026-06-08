@@ -1,0 +1,35 @@
+resume_state:
+  active_human_anims: []
+  active_human_models:
+  - girl3
+  clips_per_character: 24
+  completed_jobs:
+  - girl3_136_15_walk_back_crouch_0
+  - girl3_137_16_drunk_walk_0
+  - girl3_139_13_run_in_circles_0
+  - girl3_140_08_get_up_0
+  - girl3_141_29_random_walk_0
+  - girl3_141_31_walk_backwards_0
+  - girl3_142_02_clumsy_0
+  - girl3_142_07_elderly_0
+  - girl3_143_04_figure_8_0
+  - girl3_143_22_football_0
+  - girl3_143_40_walk_sideways_0
+  - girl3_144_15_left_spin_0
+  - girl3_144_17_lunges_0
+  - girl3_144_30_sun_salutation_0
+  - girl3_18_15_chicken_dance_0
+  - girl3_19_08_hand_gesture_0
+  - girl3_49_02_hop_on_foot_0
+  - girl3_49_06_cartwheel_0
+  - girl3_49_18_one_leg_balance_0
+  - girl3_61_10_salsa_0
+  - girl3_62_11_cleaning_0
+  - girl3_62_13_moving_0
+  - girl3_76_05_bug_swat_0
+  - girl3_77_19_limping_0
+  in_progress_job: null
+  last_update: '2026-05-31 20:04:53'
+  seq_range:
+  - 0
+  - 1

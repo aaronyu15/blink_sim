@@ -314,6 +314,134 @@ class DatasetAnalyzer:
             self._log(f"Error processing event windows from {flow_h5_path}: {e}")
         return num_windows
     
+    def analyze_flow_with_event_mask(self, flow_path, event_path_curr, event_path_prev=None):
+        """
+        Analyze flow using event-based valid mask
+        
+        For each flow frame i (representing motion from frame i to i+1),
+        we create a mask from events that occurred between frame i and frame i+1.
+        Only pixels with events are considered valid.
+        
+        Args:
+            flow_path: Path to flow .npy file
+            event_path_curr: Path to event .h5 file for current frame (frame i+1)
+            event_path_prev: Path to event .h5 file for previous frame (frame i), optional
+        """
+        try:
+            # Load flow
+            flow = np.load(flow_path)
+            
+            if len(flow.shape) == 3 and flow.shape[2] == 3:
+                flow_u = flow[:, :, 0]
+                flow_v = flow[:, :, 1]
+                valid_mask = flow[:, :, 2]
+                h, w = flow_u.shape
+            elif len(flow.shape) == 3 and flow.shape[2] == 2:
+                flow_u = flow[:, :, 0]
+                flow_v = flow[:, :, 1]
+                h, w = flow_u.shape
+                valid_mask = np.ones((h, w))
+            else:
+                self._log(f"Warning: Unexpected flow shape {flow.shape} in {flow_path}")
+                return
+            
+            # Create event mask from event files
+            event_mask = np.zeros((h, w), dtype=bool)
+            
+            # Load current frame events
+            try:
+                with h5py.File(event_path_curr, 'r') as f:
+                    if 'events/x' in f and 'events/y' in f:
+                        x = f['events/x'][:]
+                        y = f['events/y'][:]
+                        
+                        # Mark pixels with events
+                        valid_coords = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+                        x_valid = x[valid_coords].astype(int)
+                        y_valid = y[valid_coords].astype(int)
+                        event_mask[y_valid, x_valid] = True
+                        
+            except Exception as e:
+                self._log(f"Warning: Could not load events from {event_path_curr}: {e}")
+                return
+            
+            # Optionally load previous frame events (for inter-frame events)
+            if event_path_prev and os.path.exists(event_path_prev):
+                try:
+                    with h5py.File(event_path_prev, 'r') as f:
+                        if 'events/x' in f and 'events/y' in f:
+                            x = f['events/x'][:]
+                            y = f['events/y'][:]
+                            
+                            valid_coords = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+                            x_valid = x[valid_coords].astype(int)
+                            y_valid = y[valid_coords].astype(int)
+                            event_mask[y_valid, x_valid] = True
+                except Exception as e:
+                    pass  # Previous frame events are optional
+            
+            # Combine with existing valid mask
+            combined_mask = (valid_mask > 0.5) & event_mask
+            
+            if not combined_mask.any():
+                return
+            
+            # Extract valid flow
+            flow_u_valid = flow_u[combined_mask]
+            flow_v_valid = flow_v[combined_mask]
+            magnitude = np.sqrt(flow_u_valid**2 + flow_v_valid**2)
+            angles = np.arctan2(flow_v_valid, flow_u_valid)
+            
+            # Update statistics
+            n = len(magnitude)
+            self.event_mask_stats['total_pixels'] += h * w
+            self.event_mask_stats['total_valid_pixels'] += n
+            self.event_mask_stats['sample_count'] += 1
+            
+            # Running sums
+            self.event_mask_stats['mag_sum'] += np.sum(magnitude)
+            self.event_mask_stats['mag_sum_sq'] += np.sum(magnitude**2)
+            self.event_mask_stats['mag_min'] = min(self.event_mask_stats['mag_min'], float(np.min(magnitude)))
+            self.event_mask_stats['mag_max'] = max(self.event_mask_stats['mag_max'], float(np.max(magnitude)))
+            
+            self.event_mask_stats['u_sum'] += np.sum(flow_u_valid)
+            self.event_mask_stats['u_sum_sq'] += np.sum(flow_u_valid**2)
+            self.event_mask_stats['u_min'] = min(self.event_mask_stats['u_min'], float(np.min(flow_u_valid)))
+            self.event_mask_stats['u_max'] = max(self.event_mask_stats['u_max'], float(np.max(flow_u_valid)))
+            
+            self.event_mask_stats['v_sum'] += np.sum(flow_v_valid)
+            self.event_mask_stats['v_sum_sq'] += np.sum(flow_v_valid**2)
+            self.event_mask_stats['v_min'] = min(self.event_mask_stats['v_min'], float(np.min(flow_v_valid)))
+            self.event_mask_stats['v_max'] = max(self.event_mask_stats['v_max'], float(np.max(flow_v_valid)))
+            
+            # Per-sample stats
+            self.event_mask_stats['per_sample_mean'].append(float(np.mean(magnitude)))
+            self.event_mask_stats['per_sample_max'].append(float(np.max(magnitude)))
+            self.event_mask_stats['per_sample_coverage'].append(float(n) / (h * w))
+            
+            # Direction statistics
+            direction_hist, _ = np.histogram(angles, bins=self.flow_stats['direction_bins'])
+            self.event_mask_stats['direction_counts'] += direction_hist
+            
+            # Quadrant counts
+            nonzero_mask = magnitude > 0.01
+            if nonzero_mask.any():
+                u_nz = flow_u_valid[nonzero_mask]
+                v_nz = flow_v_valid[nonzero_mask]
+                self.event_mask_stats['quadrant_counts']['right'] += np.sum(u_nz > 0)
+                self.event_mask_stats['quadrant_counts']['left'] += np.sum(u_nz < 0)
+                self.event_mask_stats['quadrant_counts']['down'] += np.sum(v_nz > 0)
+                self.event_mask_stats['quadrant_counts']['up'] += np.sum(v_nz < 0)
+                
+        except Exception as e:
+            self._log(f"Error processing event-masked flow {flow_path}: {e}")
+
+                    num_windows += 1
+
+        except Exception as e:
+            self._log(f"Error processing event windows from {flow_h5_path}: {e}")
+        return num_windows
+    
     def analyze_flow_h5_with_event_mask(self, flow_h5_path, event_h5_path, frame_fps=30.0):
         """Analyze flow.h5 using an event mask built from the shared sequence event stream."""
         try:

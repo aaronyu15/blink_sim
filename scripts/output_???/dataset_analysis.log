@@ -1,0 +1,169 @@
+Scanning dataset at: ../output/train
+Found 120 sample directories
+
+Pass 1: Computing data ranges...
+
+Initializing histograms based on data range...
+  Magnitude range: [0.00, 105.04]
+  U component range: [-103.47, 101.89]
+  V component range: [-104.64, 102.03]
+  Bins per histogram: 1000
+
+Pass 2: Building histograms from all pixels...
+
+Pass 3: Analyzing with event-based valid masks...
+
+Total processed: 29100 flow files and 29100 event files
+Event-masked analysis: 29100 flow-event pairs
+All 2,961,355,171 valid pixels included in histograms
+
+======================================================================
+FLOW STATISTICS
+======================================================================
+
+Total flow samples analyzed: 29100
+Total valid pixels analyzed: 2,961,355,171
+
+Flow Magnitude Statistics:
+  Mean:               0.2248
+  Std Dev:            1.3890
+  Min:                0.0000
+  Max:                95.4923
+  Median:             0.0525
+  25th percentile:    0.0525
+  75th percentile:    0.0525
+  95th percentile:    0.8929
+  99th percentile:    5.9348
+
+Flow Magnitude Statistics (Non-Zero Only):
+  Total non-zero pixels:  2,961,355,171 (100.00% of valid pixels)
+  Mean:               0.2731
+  Std Dev:            1.3812
+  Min:                0.0525
+  Max:                95.5353
+  Median:             0.0525
+  75th percentile:    0.0525
+  95th percentile:    0.8929
+  99th percentile:    5.9348
+
+Flow U Component Statistics:
+  Mean:               -0.0031
+  Std Dev:            0.8108
+  Min:                -94.0625
+  Max:                92.6250
+
+Flow V Component Statistics:
+  Mean:               0.0022
+  Std Dev:            1.1499
+  Min:                -95.1250
+  Max:                92.7500
+
+Per-Sample Statistics:
+  Avg of sample means:    0.2296
+  Avg of sample maxs:     6.0093
+  Avg of sample mins:     0.0000
+  Avg of sample stds:     0.6819
+
+Flow Direction Statistics:
+  Top 5 Direction Bins (angle, count, %)
+    1.    0.0°: 286,402,458 (11.49%)
+    2.  -92.6°: 262,091,709 (10.51%)
+    3.   92.6°: 257,257,252 (10.32%)
+    4.  -41.1°: 109,804,559 (4.40%)
+    5.  133.7°: 99,537,527 (3.99%)
+
+Flow Quadrant Distribution (non-zero flow only):
+   Right: 115,768,149 (24.82%)
+    Left: 117,485,590 (25.18%)
+      Up: 123,950,472 (26.57%)
+    Down: 109,302,755 (23.43%)
+
+Top 10 Flow Magnitude Samples:
+   1. boy2_14_14_jumping_jacks_0/flow.h5:51: 95.4923 pixels
+   2. boy2_14_14_jumping_jacks_0/flow.h5:75: 95.3055 pixels
+   3. boy2_05_06_cartwheel_0/flow.h5:87: 94.9097 pixels
+   4. boy2_05_06_cartwheel_0/flow.h5:111: 94.0625 pixels
+   5. boy2_05_06_cartwheel_0/flow.h5:35: 92.6315 pixels
+   6. boy2_05_06_cartwheel_0/flow.h5:88: 92.3964 pixels
+   7. boy2_14_14_jumping_jacks_0/flow.h5:83: 92.2867 pixels
+   8. boy2_05_06_cartwheel_0/flow.h5:123: 90.9914 pixels
+   9. boy2_14_14_jumping_jacks_0/flow.h5:42: 85.7411 pixels
+  10. boy2_14_14_jumping_jacks_0/flow.h5:50: 85.7290 pixels
+
+======================================================================
+EVENT STATISTICS
+======================================================================
+
+Total event files analyzed: 29100
+Total events: 239,366,531
+
+Events Per Sample:
+  Mean:               8225.65
+  Median:             4509.00
+  Std Dev:            11542.60
+  Min:                586
+  Max:                163202
+
+Event Polarities:
+  Polarity 0: 119,760,045 (50.03%)
+  Polarity 1: 119,606,486 (49.97%)
+
+Time Span Per Sample (microseconds):
+  Mean:               33309.88
+  Median:             33322.00
+  Min:                32930.00
+  Max:                33333.00
+
+======================================================================
+======================================================================
+EVENT-BASED VALID MASK FLOW STATISTICS
+======================================================================
+(Only considers pixels that had events between flow frames)
+
+Total samples analyzed: 29100
+Total pixels analyzed: 2,979,840,000
+Total valid pixels (with events): 79,668,406 (2.67% of all pixels)
+
+Flow Magnitude Statistics (Event-Masked):
+  Mean:               3.3787
+  Std Dev:            5.2471
+  Min:                0.0000
+  Max:                95.4923
+
+Flow U Component Statistics (Event-Masked):
+  Mean:               -0.0023
+  Std Dev:            3.4549
+  Min:                -94.0625
+  Max:                71.6250
+
+Flow V Component Statistics (Event-Masked):
+  Mean:               0.1084
+  Std Dev:            5.1961
+  Min:                -95.1250
+  Max:                92.7500
+
+Per-Sample Statistics (Event-Masked):
+  Avg of sample means:    1.7408
+  Avg of sample maxs:     5.9841
+  Avg event coverage:     2.67%
+
+Flow Direction Statistics (Event-Masked):
+  Top 5 Direction Bins (angle, count, %)
+    1.   92.6°: 5,055,792 (6.72%)
+    2.  -92.6°: 4,914,692 (6.53%)
+    3.    0.0°: 4,667,087 (6.20%)
+    4.  -82.3°: 2,589,246 (3.44%)
+    5. -174.9°: 2,371,621 (3.15%)
+
+Flow Quadrant Distribution (Event-Masked, non-zero):
+   Right: 27,353,404 (25.19%)
+    Left: 26,944,683 (24.81%)
+      Up: 27,634,421 (25.45%)
+    Down: 26,663,586 (24.55%)
+
+======================================================================
+Combined flow distribution figure saved to: output/flow_distributions_stacked.pdf
+Flow direction analysis saved to: output/flow_direction_analysis.pdf
+Event X-coordinate histogram saved to: output/event_x_coordinate_histogram.pdf
+Event Y-coordinate histogram saved to: output/event_y_coordinate_histogram.pdf
+Event rate plot saved to: output/event_rate_per_second.pdf

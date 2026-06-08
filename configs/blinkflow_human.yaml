@@ -1,96 +1,162 @@
 image_width: 320
 image_height: 320
-use_gpu: true  # Enable GPU rendering (set to false to use CPU only)
-num_cpu_threads: 32 # CPU worker threads for Blender rendering and Python post-processing
-use_humans: true  # Enable human rendering mode
-save_blend_file: false  # Save .blend file for debugging
+use_gpu: true
+num_cpu_threads: 32
+use_humans: true
+save_blend_file: false
 save_hdr: false
 save_hdr_mp4: false
 save_rgb_reference: true
 save_rgb_event_input: true
-event_noise_enabled: true  # Inject salt-and-pepper DVS-like background noise
-event_noise_rate: 20000      # Salt-and-pepper noise rate in events per second (independent of event count)
-
-# Human model and animation directories
-human_model_dir: 'data/human_models'
-human_anim_dir: 'data/human_animations/train'
-active_human_models: []  # Optional list of model basenames to include; empty means all
-active_human_anims: []    # Optional list of animation basenames to include; empty means all
-clips_per_character: 24 # 0 means default to seq_range length; otherwise controls clips per active model.
-
-# HDR environment for lighting
-hdr_dir: 'data/haven/hdris/'
-use_solid_background: true
-solid_background_color: [0.5, 0.5, 0.5]
+event_noise_enabled: true
+event_noise_rate: 50000
+human_model_dir: data/human_models
+human_anim_dir: data/human_animations/test
+active_human_models:
+- girl3
+active_human_anims: []
+clips_per_character: 24
+hdr_dir: data/haven/hdris/
+use_solid_background: false
+solid_background_color:
+- 0.5
+- 0.5
+- 0.5
 randomize_solid_background: true
-solid_background_gray_range: [0.2, 0.8]
+solid_background_gray_range:
+- 0.2
+- 0.8
 solid_background_strength: 1.0
-
-
-# Keep imported character transform untouched; randomization comes from camera motion.
-camera_target: [0.0, 0.0, 0.0]
-camera_target_mode: 'hips_bone'  # 'hips_bone' uses animated hips transform; 'model_initial' uses model center; 'fixed' uses camera_target
-camera_target_bone: 'Hips'  # Preferred bone name for camera_target_mode='hips_bone' (auto-fallback to hips/pelvis aliases)
-camera_target_frame: 0  # Frame used when camera_target_mode='model_initial' (default: animation start if available)
-camera_cube_extent: 40.0  # Half-side length of cube around origin (±25 in X and Y)
-camera_z_range: [5.0, 30.0]  # Z range for upper half of cube
-camera_pitch_z_reference: 8.0  # Z height where pitch = camera_pitch_base_deg (typically 90° for straight down)
-camera_pitch_base_deg: 90.0  # Pitch angle in degrees at z_reference; Y rot = 0, X rot = pitch
-camera_pitch_scale_per_unit_z: 2.0  # Change in pitch per unit of Z above/below reference (degrees/unit)
-camera_pitch_max_z_lookat_origin: 25.0  # At/above this Z, ignore pitch curve and point directly at camera_target
-camera_follow_enabled: true  # If true, camera follows behind hips motion using inertia
-camera_follow_rotation_only: true  # Keep camera fixed in place; only rotate to follow hips target
-camera_follow_edge_tracking: true  # Only pan/tilt when hips near image edge
-camera_follow_edge_margin: 0.5  # Normalized margin (0-0.5); larger means tracking starts earlier
-camera_follow_min_target_shift: 0.20  # Meters; ignore tiny hips jitter when deciding to pan/tilt
-camera_follow_distance: 4.0  # Distance kept behind motion direction
-camera_follow_height_offset: 2.0  # Vertical offset above hips target
-camera_follow_inertia: 0.45  # 0=no smoothing, closer to 1=slower smoother follow
-
-# Legacy fields (kept for compatibility; not used by current human import path)
-human_x_offset: [0, 0]
-human_distance: [5, 5]
-human_z_offset: [0, 0]
-human_z_rotation: [0, 0]
-# Animation settings
-use_cycles: True
-animation_mode: 'linear'
-duration: 10.0  # Config duration in seconds (fallback or cap)
-clamp_duration_to_animation: true  # When true, render min(config duration, animation length). When false, always render full animation.
-trim_initial_rgb_frames: 3  # Skip initial N frames (e.g., T-pose settling); still renders full duration but exports frame_N onward
-event_image_fps: 300 # FPS for event simulation
-rgb_image_fps: 30  # FPS for RGB frames
+camera_locked_background: true
+camera_locked_background_source: hdri
+camera_target:
+- 0.0
+- 0.0
+- 0.0
+camera_target_mode: hips_bone
+camera_target_bone: Hips
+camera_follow_random_target_parts: false
+camera_follow_target_part_probs:
+  hips: 0.6
+  face: 0.2
+  hands: 0.2
+camera_target_frame: 0
+camera_cube_extent: 40.0
+camera_z_range:
+- 10.0
+- 20.0
+camera_pitch_z_reference: 8.0
+camera_pitch_base_deg: 90.0
+camera_pitch_scale_per_unit_z: 2.0
+camera_pitch_max_z_lookat_origin: 25.0
+camera_follow_enabled: true
+camera_follow_distance_range:
+- 25.0
+- 55.0
+camera_follow_distance_center_band_ratio: 0.05
+camera_follow_auto_distance_scale: 1.5
+camera_follow_auto_distance_bias: 0.0
+camera_follow_elevation_deg_range:
+- 8.0
+- 30.0
+camera_follow_position_inertia: 0.35
+camera_follow_target_jitter_xyz:
+- 0.02
+- 0.02
+- 0.01
+camera_follow_rotation_inertia: 0.995
+camera_follow_target_lock_strength: 0.2
+camera_follow_target_update_stride: 6
+camera_follow_trailing_distance_range:
+- 10.0
+- 25.0
+camera_follow_side_offset_range:
+- -0.6
+- 0.6
+camera_follow_look_ahead: 0.5
+camera_follow_fixed_position: true
+camera_precompute_min_visible_fraction: 0.8
+camera_precompute_motion_quantile: 0.8
+camera_precompute_num_candidates: 160
+camera_precompute_max_samples: 120
+camera_precompute_bbox_corner_fraction: 0.15
+camera_precompute_view_margin: 0.03
+camera_precompute_distance_tests: 28
+camera_static_num_keyframes: 2
+camera_follow_anchor_alpha_range:
+- 0.2
+- 0.8
+camera_follow_num_keyframes: 200
+human_x_offset:
+- 0
+- 0
+human_distance:
+- 5
+- 5
+human_z_offset:
+- 0
+- 0
+human_z_rotation:
+- 0
+- 0
+use_cycles: true
+animation_mode: linear
+duration: 10.0
+clamp_duration_to_animation: true
+trim_initial_rgb_frames: 3
+event_image_fps: 300
+rgb_image_fps: 30
 num_keyframes: 2
-locomotion_keywords: ['run','walk','jog','sprint']
-locomotion_yaw_choices: [-1.57, 1.57]
+locomotion_keywords:
+- run
+- walk
+- jog
+- sprint
+locomotion_yaw_choices:
+- -1.57
+- 1.57
 locomotion_start_offset: 4.0
 loop_locomotion: false
 use_fill_light: true
-fill_light_position_mode: 'cube_random'  # 'camera_offset' or 'cube_random'
-fill_light_cube_full_z: true  # If true, sample Z in [-camera_cube_extent, camera_cube_extent]
-fill_light_cube_min_separation: 5.0  # Keep light at least this far from camera in cube_random mode
+fill_light_position_mode: cube_random
+fill_light_cube_full_z: true
+fill_light_cube_min_separation: 5.0
 fill_light_cube_max_attempts: 30
-fill_light_energy: [0, 100]
+fill_light_energy:
+- 0
+- 100
 fill_light_distance: 1.0
-fill_light_height: 0.75
+fill_light_height: 10.75
 fill_light_size: 1.0
-
-# Sequence range
-seq_range: [0, 1]
+seq_range:
+- 0
+- 1
 train_split_ratio: 1.0
-
-# Not used in human mode but required by config parser
 world_length: 50
 world_width: 50
 canopy_height: 30
 canopy_distance: 20
-shape_num: [1, 1]
-activte_range_for_dynamic_obj: [7, 8, 5]
-num_static_obj: [0, 0]
-image_dir: 'data/ADE20K_2021_17_01//'
-shape_dir: 'data/ShapeNetCore.v2/'
-texture_split_file: 'configs/ade20k_example.json'
-dynamic_obj_split_file: 'configs/shapenet_example.json'
-min_hsv_range: [1.0, 1.0]
-max_hsv_range: [1.0, 1.0]
-hsv_dark_prob: 0.00
+shape_num:
+- 1
+- 1
+activte_range_for_dynamic_obj:
+- 7
+- 8
+- 5
+num_static_obj:
+- 0
+- 0
+image_dir: data/ADE20K_2021_17_01//
+shape_dir: data/ShapeNetCore.v2/
+texture_split_file: configs/ade20k_example.json
+dynamic_obj_split_file: configs/shapenet_example.json
+min_hsv_range:
+- 1.0
+- 1.0
+max_hsv_range:
+- 1.0
+- 1.0
+hsv_dark_prob: 0.0
+camera_precompute_auto_expand_distance: true
+camera_precompute_hard_max_distance: 80.0
+camera_static_precompute_no_trim: true
