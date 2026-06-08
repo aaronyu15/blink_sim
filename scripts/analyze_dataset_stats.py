@@ -27,6 +27,7 @@ _STACKED_SUBPLOT_HEIGHT_PT = 140.0
 _STACKED_SUBPLOT_HEIGHT_IN = _STACKED_SUBPLOT_HEIGHT_PT * _PT_TO_IN
 _EVENT_WINDOW_SECONDS = 1.0 / 30.0
 _EVENT_WINDOW_US = _EVENT_WINDOW_SECONDS * 1e6
+_DIRECTION_MAG_THRESHOLD = 0.01
 
 
 class DatasetAnalyzer:
@@ -148,44 +149,50 @@ class DatasetAnalyzer:
         if n == 0:
             return
 
-        self.flow_stats['total_pixels'] += n
+        # Only use nonzero flows for statistics
+        nonzero_mask = magnitude > _DIRECTION_MAG_THRESHOLD
+        if not np.any(nonzero_mask):
+            return
+        mag_nz = magnitude[nonzero_mask]
+        u_nz = flow_u_valid[nonzero_mask]
+        v_nz = flow_v_valid[nonzero_mask]
+        n_nz = len(mag_nz)
+
+        self.flow_stats['total_pixels'] += n_nz
         self.flow_stats['sample_count'] += 1
 
-        self.flow_stats['mag_sum'] += np.sum(magnitude)
-        self.flow_stats['mag_sum_sq'] += np.sum(magnitude**2)
-        self.flow_stats['mag_min'] = min(self.flow_stats['mag_min'], float(np.min(magnitude)))
-        self.flow_stats['mag_max'] = max(self.flow_stats['mag_max'], float(np.max(magnitude)))
+        self.flow_stats['mag_sum'] += np.sum(mag_nz)
+        self.flow_stats['mag_sum_sq'] += np.sum(mag_nz**2)
+        self.flow_stats['mag_min'] = min(self.flow_stats['mag_min'], float(np.min(mag_nz)))
+        self.flow_stats['mag_max'] = max(self.flow_stats['mag_max'], float(np.max(mag_nz)))
 
-        self.flow_stats['u_sum'] += np.sum(flow_u_valid)
-        self.flow_stats['u_sum_sq'] += np.sum(flow_u_valid**2)
-        self.flow_stats['u_min'] = min(self.flow_stats['u_min'], float(np.min(flow_u_valid)))
-        self.flow_stats['u_max'] = max(self.flow_stats['u_max'], float(np.max(flow_u_valid)))
+        self.flow_stats['u_sum'] += np.sum(u_nz)
+        self.flow_stats['u_sum_sq'] += np.sum(u_nz**2)
+        self.flow_stats['u_min'] = min(self.flow_stats['u_min'], float(np.min(u_nz)))
+        self.flow_stats['u_max'] = max(self.flow_stats['u_max'], float(np.max(u_nz)))
 
-        self.flow_stats['v_sum'] += np.sum(flow_v_valid)
-        self.flow_stats['v_sum_sq'] += np.sum(flow_v_valid**2)
-        self.flow_stats['v_min'] = min(self.flow_stats['v_min'], float(np.min(flow_v_valid)))
-        self.flow_stats['v_max'] = max(self.flow_stats['v_max'], float(np.max(flow_v_valid)))
+        self.flow_stats['v_sum'] += np.sum(v_nz)
+        self.flow_stats['v_sum_sq'] += np.sum(v_nz**2)
+        self.flow_stats['v_min'] = min(self.flow_stats['v_min'], float(np.min(v_nz)))
+        self.flow_stats['v_max'] = max(self.flow_stats['v_max'], float(np.max(v_nz)))
 
-        sample_max_mag = float(np.max(magnitude))
-        self.flow_stats['per_sample_mean'].append(float(np.mean(magnitude)))
+        sample_max_mag = float(np.max(mag_nz))
+        self.flow_stats['per_sample_mean'].append(float(np.mean(mag_nz)))
         self.flow_stats['per_sample_max'].append(sample_max_mag)
-        self.flow_stats['per_sample_min'].append(float(np.min(magnitude)))
-        self.flow_stats['per_sample_std'].append(float(np.std(magnitude)))
+        self.flow_stats['per_sample_min'].append(float(np.min(mag_nz)))
+        self.flow_stats['per_sample_std'].append(float(np.std(mag_nz)))
 
         if sample_name is not None:
             self.top_magnitude_samples.append((sample_max_mag, sample_name))
 
-        direction_hist, _ = np.histogram(angles, bins=self.flow_stats['direction_bins'])
+        # Exclude tiny flow vectors from direction stats; angle is unstable near zero.
+        direction_hist, _ = np.histogram(angles[nonzero_mask], bins=self.flow_stats['direction_bins'])
         self.flow_stats['direction_counts'] += direction_hist
 
-        nonzero_mask = magnitude > 0.01
-        if nonzero_mask.any():
-            u_nz = flow_u_valid[nonzero_mask]
-            v_nz = flow_v_valid[nonzero_mask]
-            self.flow_stats['quadrant_counts']['right'] += np.sum(u_nz > 0)
-            self.flow_stats['quadrant_counts']['left'] += np.sum(u_nz < 0)
-            self.flow_stats['quadrant_counts']['down'] += np.sum(v_nz > 0)
-            self.flow_stats['quadrant_counts']['up'] += np.sum(v_nz < 0)
+        self.flow_stats['quadrant_counts']['right'] += np.sum(u_nz > 0)
+        self.flow_stats['quadrant_counts']['left'] += np.sum(u_nz < 0)
+        self.flow_stats['quadrant_counts']['down'] += np.sum(v_nz > 0)
+        self.flow_stats['quadrant_counts']['up'] += np.sum(v_nz < 0)
 
     def _accumulate_flow_histograms(self, flow_u_valid, flow_v_valid, magnitude):
         if not self.histogram_initialized:
@@ -194,34 +201,23 @@ class DatasetAnalyzer:
         self._accumulate_histogram('u', flow_u_valid)
         self._accumulate_histogram('v', flow_v_valid)
     
-    def analyze_flow_file(self, flow_path):
-        """Analyze a single flow .npy file with incremental statistics"""
-        try:
-            flow = np.load(flow_path)
-            extracted = self._extract_valid_flow(flow)
-            if extracted is None:
-                self._log(f"Warning: Unexpected flow shape {flow.shape} in {flow_path}")
-                return
-
-            relative_path = flow_path.relative_to(self.dataset_path)
-            flow_u_valid, flow_v_valid, magnitude, angles = extracted
-            self._update_flow_statistics(flow_u_valid, flow_v_valid, magnitude, angles, str(relative_path))
-            
-        except Exception as e:
-            self._log(f"Error processing {flow_path}: {e}")
 
     def analyze_flow_h5_file(self, flow_h5_path):
-        """Analyze one sequence-level flow_gt.h5 file."""
+        """Analyze one sequence-level flow.h5 file."""
         try:
             relative_path = flow_h5_path.relative_to(self.dataset_path)
             with h5py.File(flow_h5_path, 'r') as f:
-                if 'flow' not in f:
-                    self._log(f"Warning: Expected dataset 'flow' not found in {flow_h5_path}")
+                if 'flow/forward' not in f:
+                    self._log(f"Warning: Expected dataset 'flow/forward' not found in {flow_h5_path}")
                     return 0
-                flow_ds = f['flow']
+                flow_ds = f['flow/forward']
+                valid_ds = f['flow/valid'] if 'flow/valid' in f else None
                 frame_count = flow_ds.shape[0]
                 for frame_idx in range(frame_count):
-                    extracted = self._extract_valid_flow(flow_ds[frame_idx])
+                    frame = flow_ds[frame_idx]  # (H, W, 2)
+                    if valid_ds is not None:
+                        frame = np.concatenate([frame, valid_ds[frame_idx]], axis=-1)  # (H, W, 3)
+                    extracted = self._extract_valid_flow(frame)
                     if extracted is None:
                         continue
                     sample_name = f"{relative_path}:{frame_idx}"
@@ -232,14 +228,18 @@ class DatasetAnalyzer:
         return 0
 
     def accumulate_flow_h5_histograms(self, flow_h5_path):
-        """Second-pass histogram accumulation for one sequence-level flow_gt.h5 file."""
+        """Second-pass histogram accumulation for one sequence-level flow.h5 file."""
         try:
             with h5py.File(flow_h5_path, 'r') as f:
-                if 'flow' not in f:
+                if 'flow/forward' not in f:
                     return
-                flow_ds = f['flow']
+                flow_ds = f['flow/forward']
+                valid_ds = f['flow/valid'] if 'flow/valid' in f else None
                 for frame_idx in range(flow_ds.shape[0]):
-                    extracted = self._extract_valid_flow(flow_ds[frame_idx])
+                    frame = flow_ds[frame_idx]  # (H, W, 2)
+                    if valid_ds is not None:
+                        frame = np.concatenate([frame, valid_ds[frame_idx]], axis=-1)  # (H, W, 3)
+                    extracted = self._extract_valid_flow(frame)
                     if extracted is None:
                         continue
                     flow_u_valid, flow_v_valid, magnitude, _angles = extracted
@@ -247,188 +247,88 @@ class DatasetAnalyzer:
         except Exception as e:
             self._log(f"Error building histograms from {flow_h5_path}: {e}")
     
-    def analyze_event_file(self, event_path):
-        """Analyze a single event .h5 file with x,y,t,p format"""
+    def analyze_event_windows(self, flow_h5_path, event_h5_path):
+        """Analyze event statistics per flow-frame window using flow/event_start and flow/event_end.
+
+        Each sample is defined as the event window associated with one ground-truth flow frame.
+        Returns the number of windows processed.
+        """
+        num_windows = 0
         try:
-            with h5py.File(event_path, 'r') as f:
-                # Events are stored in separate datasets: events/x, events/y, events/t, events/p
-                if 'events/x' in f and 'events/y' in f and 'events/t' in f and 'events/p' in f:
-                    x = f['events/x'][:]
-                    y = f['events/y'][:]
-                    t = f['events/t'][:]
-                    p = f['events/p'][:]
-                    
-                    num_events = len(x)
+            with h5py.File(flow_h5_path, 'r') as flow_f, h5py.File(event_h5_path, 'r') as event_f:
+                if not all(k in event_f for k in ['events/x', 'events/y', 'events/t', 'events/p']):
+                    self._log(f"Warning: Expected events/x,y,t,p not found in {event_h5_path}")
+                    return 0
+                if 'flow/event_start' not in flow_f or 'flow/event_end' not in flow_f:
+                    self._log(f"Warning: flow/event_start or flow/event_end not found in {flow_h5_path}")
+                    return 0
+
+                t = event_f['events/t'][:]
+                x = event_f['events/x'][:]
+                y = event_f['events/y'][:]
+                p = event_f['events/p'][:]
+                event_start_arr = flow_f['flow/event_start'][:]  # absolute timestamps, us
+                event_end_arr   = flow_f['flow/event_end'][:]
+
+                for i in range(len(event_start_arr)):
+                    t0 = int(event_start_arr[i])
+                    t1 = int(event_end_arr[i])
+                    si = np.searchsorted(t, t0, side='left')
+                    ei = np.searchsorted(t, t1, side='left')
+
+                    win_x = x[si:ei]
+                    win_y = y[si:ei]
+                    win_t = t[si:ei]
+                    win_p = p[si:ei]
+                    num_events = int(ei - si)
+
                     self.event_stats['total_events'] += num_events
                     self.event_stats['events_per_sample'].append(num_events)
                     self.event_stats['sample_count'] += 1
-                    
-                    # Sample data for histograms (max 10k events per file)
+
                     if len(self.event_stats['x_coords']) < self.max_histogram_samples:
-                        self.event_stats['x_coords'].extend(x.tolist())
-                        self.event_stats['y_coords'].extend(y.tolist())
-                        self.event_stats['polarities'].extend(p.tolist())
-                    
-                    # Compute time span for this sample
-                    if num_events > 0:
-                        time_span = float(t[-1] - t[0])
-                        self.event_stats['time_spans'].append(time_span)
-                        if time_span > 0:
-                            self.event_stats['event_rate_per_sec'].append(num_events / (time_span * 1e-6))
-                    
-                    # Count polarities
-                    unique_p, counts = np.unique(p, return_counts=True)
-                    positive_events = 0
-                    for pol, count in zip(unique_p, counts):
-                        pol_int = int(pol)
-                        self.event_stats['polarity_counts'][pol_int] = \
-                            self.event_stats['polarity_counts'].get(pol_int, 0) + int(count)
-                        if pol > 0:
-                            positive_events += int(count)
+                        self.event_stats['x_coords'].extend(win_x.tolist())
+                        self.event_stats['y_coords'].extend(win_y.tolist())
+                        self.event_stats['polarities'].extend(win_p.tolist())
+
+                    time_span = float(t1 - t0)
+                    self.event_stats['time_spans'].append(time_span)
+                    if time_span > 0:
+                        self.event_stats['event_rate_per_sec'].append(num_events / (time_span * 1e-6))
 
                     if num_events > 0:
+                        unique_p, counts_p = np.unique(win_p, return_counts=True)
+                        positive_events = 0
+                        for pol, cnt in zip(unique_p, counts_p):
+                            pol_int = int(pol)
+                            self.event_stats['polarity_counts'][pol_int] = (
+                                self.event_stats['polarity_counts'].get(pol_int, 0) + int(cnt)
+                            )
+                            if pol > 0:
+                                positive_events += int(cnt)
                         self.event_stats['positive_fraction_per_sample'].append(positive_events / num_events)
-                else:
-                    self._log(f"Warning: Expected format 'events/x,y,t,p' not found in {event_path}")
-                    self._log(f"Available keys: {list(f.keys())}")
-                
-        except Exception as e:
-            self._log(f"Error processing {event_path}: {e}")
-    
-    def analyze_flow_with_event_mask(self, flow_path, event_path_curr, event_path_prev=None):
-        """
-        Analyze flow using event-based valid mask
-        
-        For each flow frame i (representing motion from frame i to i+1),
-        we create a mask from events that occurred between frame i and frame i+1.
-        Only pixels with events are considered valid.
-        
-        Args:
-            flow_path: Path to flow .npy file
-            event_path_curr: Path to event .h5 file for current frame (frame i+1)
-            event_path_prev: Path to event .h5 file for previous frame (frame i), optional
-        """
-        try:
-            # Load flow
-            flow = np.load(flow_path)
-            
-            if len(flow.shape) == 3 and flow.shape[2] == 3:
-                flow_u = flow[:, :, 0]
-                flow_v = flow[:, :, 1]
-                valid_mask = flow[:, :, 2]
-                h, w = flow_u.shape
-            elif len(flow.shape) == 3 and flow.shape[2] == 2:
-                flow_u = flow[:, :, 0]
-                flow_v = flow[:, :, 1]
-                h, w = flow_u.shape
-                valid_mask = np.ones((h, w))
-            else:
-                self._log(f"Warning: Unexpected flow shape {flow.shape} in {flow_path}")
-                return
-            
-            # Create event mask from event files
-            event_mask = np.zeros((h, w), dtype=bool)
-            
-            # Load current frame events
-            try:
-                with h5py.File(event_path_curr, 'r') as f:
-                    if 'events/x' in f and 'events/y' in f:
-                        x = f['events/x'][:]
-                        y = f['events/y'][:]
-                        
-                        # Mark pixels with events
-                        valid_coords = (x >= 0) & (x < w) & (y >= 0) & (y < h)
-                        x_valid = x[valid_coords].astype(int)
-                        y_valid = y[valid_coords].astype(int)
-                        event_mask[y_valid, x_valid] = True
-                        
-            except Exception as e:
-                self._log(f"Warning: Could not load events from {event_path_curr}: {e}")
-                return
-            
-            # Optionally load previous frame events (for inter-frame events)
-            if event_path_prev and os.path.exists(event_path_prev):
-                try:
-                    with h5py.File(event_path_prev, 'r') as f:
-                        if 'events/x' in f and 'events/y' in f:
-                            x = f['events/x'][:]
-                            y = f['events/y'][:]
-                            
-                            valid_coords = (x >= 0) & (x < w) & (y >= 0) & (y < h)
-                            x_valid = x[valid_coords].astype(int)
-                            y_valid = y[valid_coords].astype(int)
-                            event_mask[y_valid, x_valid] = True
-                except Exception as e:
-                    pass  # Previous frame events are optional
-            
-            # Combine with existing valid mask
-            combined_mask = (valid_mask > 0.5) & event_mask
-            
-            if not combined_mask.any():
-                return
-            
-            # Extract valid flow
-            flow_u_valid = flow_u[combined_mask]
-            flow_v_valid = flow_v[combined_mask]
-            magnitude = np.sqrt(flow_u_valid**2 + flow_v_valid**2)
-            angles = np.arctan2(flow_v_valid, flow_u_valid)
-            
-            # Update statistics
-            n = len(magnitude)
-            self.event_mask_stats['total_pixels'] += h * w
-            self.event_mask_stats['total_valid_pixels'] += n
-            self.event_mask_stats['sample_count'] += 1
-            
-            # Running sums
-            self.event_mask_stats['mag_sum'] += np.sum(magnitude)
-            self.event_mask_stats['mag_sum_sq'] += np.sum(magnitude**2)
-            self.event_mask_stats['mag_min'] = min(self.event_mask_stats['mag_min'], float(np.min(magnitude)))
-            self.event_mask_stats['mag_max'] = max(self.event_mask_stats['mag_max'], float(np.max(magnitude)))
-            
-            self.event_mask_stats['u_sum'] += np.sum(flow_u_valid)
-            self.event_mask_stats['u_sum_sq'] += np.sum(flow_u_valid**2)
-            self.event_mask_stats['u_min'] = min(self.event_mask_stats['u_min'], float(np.min(flow_u_valid)))
-            self.event_mask_stats['u_max'] = max(self.event_mask_stats['u_max'], float(np.max(flow_u_valid)))
-            
-            self.event_mask_stats['v_sum'] += np.sum(flow_v_valid)
-            self.event_mask_stats['v_sum_sq'] += np.sum(flow_v_valid**2)
-            self.event_mask_stats['v_min'] = min(self.event_mask_stats['v_min'], float(np.min(flow_v_valid)))
-            self.event_mask_stats['v_max'] = max(self.event_mask_stats['v_max'], float(np.max(flow_v_valid)))
-            
-            # Per-sample stats
-            self.event_mask_stats['per_sample_mean'].append(float(np.mean(magnitude)))
-            self.event_mask_stats['per_sample_max'].append(float(np.max(magnitude)))
-            self.event_mask_stats['per_sample_coverage'].append(float(n) / (h * w))
-            
-            # Direction statistics
-            direction_hist, _ = np.histogram(angles, bins=self.flow_stats['direction_bins'])
-            self.event_mask_stats['direction_counts'] += direction_hist
-            
-            # Quadrant counts
-            nonzero_mask = magnitude > 0.01
-            if nonzero_mask.any():
-                u_nz = flow_u_valid[nonzero_mask]
-                v_nz = flow_v_valid[nonzero_mask]
-                self.event_mask_stats['quadrant_counts']['right'] += np.sum(u_nz > 0)
-                self.event_mask_stats['quadrant_counts']['left'] += np.sum(u_nz < 0)
-                self.event_mask_stats['quadrant_counts']['down'] += np.sum(v_nz > 0)
-                self.event_mask_stats['quadrant_counts']['up'] += np.sum(v_nz < 0)
-                
-        except Exception as e:
-            self._log(f"Error processing event-masked flow {flow_path}: {e}")
 
+                    num_windows += 1
+
+        except Exception as e:
+            self._log(f"Error processing event windows from {flow_h5_path}: {e}")
+        return num_windows
+    
     def analyze_flow_h5_with_event_mask(self, flow_h5_path, event_h5_path, frame_fps=30.0):
-        """Analyze flow_gt.h5 using an event mask built from the shared sequence event stream."""
+        """Analyze flow.h5 using an event mask built from the shared sequence event stream."""
         try:
             with h5py.File(flow_h5_path, 'r') as flow_f, h5py.File(event_h5_path, 'r') as event_f:
-                if 'flow' not in flow_f:
-                    self._log(f"Warning: Expected dataset 'flow' not found in {flow_h5_path}")
+                if 'flow/forward' not in flow_f:
+                    self._log(f"Warning: Expected dataset 'flow/forward' not found in {flow_h5_path}")
                     return 0
                 if not all(key in event_f for key in ['events/x', 'events/y', 'events/t']):
                     self._log(f"Warning: Expected events/x,y,t not found in {event_h5_path}")
                     return 0
 
-                flow_ds = flow_f['flow']
+                flow_ds = flow_f['flow/forward']
+                valid_ds = flow_f['flow/valid'] if 'flow/valid' in flow_f else None
+                event_start_ds = flow_f['flow/event_start'] if 'flow/event_start' in flow_f else None
+                event_end_ds = flow_f['flow/event_end'] if 'flow/event_end' in flow_f else None
                 x = event_f['events/x'][:]
                 y = event_f['events/y'][:]
                 t = event_f['events/t'][:]
@@ -437,14 +337,15 @@ class DatasetAnalyzer:
 
                 processed = 0
                 num_frames = flow_ds.shape[0]
-                total_duration_us = float(t[-1] - t[0])
+                # Fallback FPS-based timing when event_start/end metadata is absent
                 t_start_us = float(t[0])
-                frame_interval_us = total_duration_us / max(1, num_frames)
-                if frame_fps > 0:
-                    frame_interval_us = min(frame_interval_us, 1e6 / frame_fps)
+                frame_interval_us = 1e6 / frame_fps if frame_fps > 0 else 1e6 / 30.0
 
                 for frame_idx in range(num_frames):
-                    flow_frame = flow_ds[frame_idx]
+                    frame = flow_ds[frame_idx]  # (H, W, 2)
+                    if valid_ds is not None:
+                        frame = np.concatenate([frame, valid_ds[frame_idx]], axis=-1)  # (H, W, 3)
+                    flow_frame = frame
                     if len(flow_frame.shape) != 3 or flow_frame.shape[2] not in (2, 3):
                         continue
 
@@ -453,8 +354,12 @@ class DatasetAnalyzer:
                     h, w = flow_u.shape
                     valid_mask = (flow_frame[:, :, 2] > 0.5) if flow_frame.shape[2] == 3 else np.ones((h, w), dtype=bool)
 
-                    t1 = t_start_us + (frame_idx + 1) * frame_interval_us
-                    t0 = max(t_start_us, t1 - _EVENT_WINDOW_US)
+                    if event_start_ds is not None and event_end_ds is not None:
+                        t0 = float(event_start_ds[frame_idx])
+                        t1 = float(event_end_ds[frame_idx])
+                    else:
+                        t1 = t_start_us + (frame_idx + 1) * frame_interval_us
+                        t0 = max(t_start_us, t1 - _EVENT_WINDOW_US)
                     start_idx = np.searchsorted(t, t0, side='left')
                     end_idx = np.searchsorted(t, t1, side='left')
                     self.event_stats['events_per_flow_frame'].append(int(end_idx - start_idx))
@@ -467,7 +372,8 @@ class DatasetAnalyzer:
                         if np.any(valid_coords):
                             event_mask[y_slice[valid_coords].astype(int), x_slice[valid_coords].astype(int)] = True
 
-                    combined_mask = valid_mask & event_mask
+                    magnitude_mask = np.sqrt(flow_u**2 + flow_v**2) > _DIRECTION_MAG_THRESHOLD
+                    combined_mask = valid_mask & event_mask & magnitude_mask
                     if not combined_mask.any():
                         continue
 
@@ -501,7 +407,7 @@ class DatasetAnalyzer:
                     direction_hist, _ = np.histogram(angles, bins=self.flow_stats['direction_bins'])
                     self.event_mask_stats['direction_counts'] += direction_hist
 
-                    nonzero_mask = magnitude > 0.01
+                    nonzero_mask = magnitude > _DIRECTION_MAG_THRESHOLD
                     if nonzero_mask.any():
                         u_nz = flow_u_valid[nonzero_mask]
                         v_nz = flow_v_valid[nonzero_mask]
@@ -627,6 +533,15 @@ class DatasetAnalyzer:
             result[p] = bin_centers[idx]
 
         return result
+
+    @staticmethod
+    def _compute_mean_from_counts(bins, counts):
+        """Compute mean from histogram bins/counts."""
+        if len(counts) == 0 or np.sum(counts) == 0:
+            return 0.0
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        mean = np.sum(bin_centers * counts) / np.sum(counts)
+        return float(mean)
     
     def _log(self, message):
         """Write message to log file or stdout"""
@@ -651,29 +566,14 @@ class DatasetAnalyzer:
         self._log("\nPass 1: Computing data ranges...")
         for subdir in tqdm(subdirs, desc="Pass 1"):
             # Process flow files
-            flow_dir = subdir / 'forward_flow'
-            if flow_dir.exists():
-                flow_h5_file = flow_dir / 'flow_gt.h5'
-                if flow_h5_file.exists():
-                    flow_count += self.analyze_flow_h5_file(flow_h5_file)
-                else:
-                    flow_files = sorted(flow_dir.glob('*.npy'))
-                    for flow_file in flow_files:
-                        self.analyze_flow_file(flow_file)
-                        flow_count += 1
-            
-            # Process event files
-            event_dir = subdir / 'events_left'
-            if event_dir.exists():
-                event_h5_file = event_dir / 'events.h5'
-                if event_h5_file.exists():
-                    self.analyze_event_file(event_h5_file)
-                    event_count += 1
-                else:
-                    event_files = list(event_dir.glob('*.h5'))
-                    for event_file in event_files:
-                        self.analyze_event_file(event_file)
-                        event_count += 1
+            flow_h5_file = subdir / 'flow.h5'
+            if flow_h5_file.exists():
+                flow_count += self.analyze_flow_h5_file(flow_h5_file)
+
+            # Process event files (one sample = one flow-frame event window)
+            event_h5_file = subdir / 'events.h5'
+            if flow_h5_file.exists() and event_h5_file.exists():
+                event_count += self.analyze_event_windows(flow_h5_file, event_h5_file)
         
         # Initialize histograms based on observed range
         self._initialize_histograms()
@@ -681,58 +581,18 @@ class DatasetAnalyzer:
         # PASS 2: Accumulate histogram data
         self._log("\nPass 2: Building histograms from all pixels...")
         for subdir in tqdm(subdirs, desc="Pass 2"):
-            # Process flow files
-            flow_dir = subdir / 'forward_flow'
-            if flow_dir.exists():
-                flow_h5_file = flow_dir / 'flow_gt.h5'
-                if flow_h5_file.exists():
-                    self.accumulate_flow_h5_histograms(flow_h5_file)
-                else:
-                    flow_files = sorted(flow_dir.glob('*.npy'))
-                    for flow_file in flow_files:
-                        flow = np.load(flow_file)
-                        extracted = self._extract_valid_flow(flow)
-                        if extracted is None:
-                            continue
-                        flow_u_valid, flow_v_valid, magnitude, _angles = extracted
-                        self._accumulate_flow_histograms(flow_u_valid, flow_v_valid, magnitude)
+            flow_h5_file = subdir / 'flow.h5'
+            if flow_h5_file.exists():
+                self.accumulate_flow_h5_histograms(flow_h5_file)
         
         # PASS 3: Event-based valid mask analysis
         self._log("\nPass 3: Analyzing with event-based valid masks...")
         event_mask_count = 0
         for subdir in tqdm(subdirs, desc="Pass 3"):
-            flow_dir = subdir / 'forward_flow'
-            event_dir = subdir / 'events_left'
-            
-            if flow_dir.exists() and event_dir.exists():
-                flow_h5_file = flow_dir / 'flow_gt.h5'
-                event_h5_file = event_dir / 'events.h5'
-                if flow_h5_file.exists() and event_h5_file.exists():
-                    event_mask_count += self.analyze_flow_h5_with_event_mask(flow_h5_file, event_h5_file)
-                else:
-                    flow_files = sorted(flow_dir.glob('*.npy'))
-                    event_files = sorted(event_dir.glob('*.h5'))
-
-                    event_map = {}
-                    for event_file in event_files:
-                        try:
-                            frame_idx = int(event_file.stem)
-                            event_map[frame_idx] = event_file
-                        except ValueError:
-                            continue
-
-                    for flow_file in flow_files:
-                        try:
-                            flow_idx = int(flow_file.stem)
-                        except ValueError:
-                            continue
-
-                        event_curr = event_map.get(flow_idx + 1)
-                        event_prev = event_map.get(flow_idx)
-
-                        if event_curr:
-                            self.analyze_flow_with_event_mask(flow_file, event_curr, event_prev)
-                            event_mask_count += 1
+            flow_h5_file = subdir / 'flow.h5'
+            event_h5_file = subdir / 'events.h5'
+            if flow_h5_file.exists() and event_h5_file.exists():
+                event_mask_count += self.analyze_flow_h5_with_event_mask(flow_h5_file, event_h5_file)
         
         self._log(f"\nTotal processed: {flow_count} flow files and {event_count} event files")
         self._log(f"Event-masked analysis: {event_mask_count} flow-event pairs")
@@ -1071,9 +931,8 @@ class DatasetAnalyzer:
             ax.set_title('Flow Magnitude Distribution')
             ax.set_yscale('log')
             ax.grid(False)
-            mag_percentiles = self._compute_percentiles_from_counts(mag_bins, mag_counts, percentiles=[50, 95, 99])
-            ax.axvline(mag_percentiles[50], color='red', linestyle='-', linewidth=2, label=f"Median: {mag_percentiles[50]:.2f}")
-            ax.axvline(mag_percentiles[95], color='purple', linestyle=':', linewidth=1.5, alpha=0.7, label=f"P95: {mag_percentiles[95]:.2f}")
+            mag_mean = self._compute_mean_from_counts(mag_bins, mag_counts)
+            ax.axvline(mag_mean, color='red', linestyle='-', linewidth=2, label=f"Mean: {mag_mean:.2f}")
             ax.legend(loc='upper right')
 
             # U component distribution
@@ -1088,9 +947,8 @@ class DatasetAnalyzer:
             ax.set_title('Horizontal Flow Distribution')
             ax.set_yscale('log')
             ax.grid(False)
-            u_percentiles = self._compute_percentiles_from_counts(u_bins, u_counts, percentiles=[50, 95, 99])
-            ax.axvline(u_percentiles[50], color='red', linestyle='-', linewidth=2, label=f"Median: {u_percentiles[50]:.2f}")
-            ax.axvline(u_percentiles[95], color='purple', linestyle=':', linewidth=1.5, alpha=0.7, label=f"P95: {u_percentiles[95]:.2f}")
+            u_mean = self._compute_mean_from_counts(u_bins, u_counts)
+            ax.axvline(u_mean, color='red', linestyle='-', linewidth=2, label=f"Mean: {u_mean:.2f}")
             ax.legend(loc='upper right')
 
             # V component distribution
@@ -1105,9 +963,8 @@ class DatasetAnalyzer:
             ax.set_title('Vertical Flow Distribution')
             ax.set_yscale('log')
             ax.grid(False)
-            v_percentiles = self._compute_percentiles_from_counts(v_bins, v_counts, percentiles=[50, 95, 99])
-            ax.axvline(v_percentiles[50], color='red', linestyle='-', linewidth=2, label=f"Median: {v_percentiles[50]:.2f}")
-            ax.axvline(v_percentiles[95], color='purple', linestyle=':', linewidth=1.5, alpha=0.7, label=f"P95: {v_percentiles[95]:.2f}")
+            v_mean = self._compute_mean_from_counts(v_bins, v_counts)
+            ax.axvline(v_mean, color='red', linestyle='-', linewidth=2, label=f"Mean: {v_mean:.2f}")
             ax.legend(loc='upper right')
             plt.tight_layout()
             flow_combined_path = output_dir / 'flow_distributions_stacked.pdf'
@@ -1141,17 +998,22 @@ class DatasetAnalyzer:
             if self.event_stats['x_coords']:
                 x_coords = np.array(self.event_stats['x_coords'])
                 fig, ax = plt.subplots(1, 1, figsize=(self.fig_width, self.fig_height))
-                ax.hist(x_coords, bins=50, edgecolor='black', alpha=0.7, color='blue')
+                counts, _, _ = ax.hist(x_coords, bins=50, edgecolor='black', alpha=0.7, color='blue')
                 ax.set_xlabel(r'$x$ Coordinate (px)')
                 ax.set_ylabel('Event Count (log scale)')
                 ax.set_title(r'Event $x$ Coordinate Distribution')
                 ax.set_yscale('log')
+
+                ymax = float(np.max(counts)) if counts.size > 0 else 1.0
+                ylim_top = max(10.0, 10.0 ** np.ceil(np.log10(max(1.0, ymax))))
+                ax.set_ylim(10**3, 10**5)
+
                 ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0,)))
                 ax.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
                 ax.yaxis.set_minor_formatter(NullFormatter())
                 ax.grid(False)
-                p50 = np.percentile(x_coords, 50)
-                ax.axvline(p50, color='red', linestyle='-', linewidth=2, label=f"Median: {p50:.0f}")
+                mean_x = float(np.mean(x_coords)) if len(x_coords) > 0 else 0.0
+                ax.axvline(mean_x, color='red', linestyle='-', linewidth=2, label=f"Mean: {mean_x:.0f}")
                 ax.legend()
                 plt.tight_layout()
                 x_coord_path = output_dir / 'event_x_coordinate_histogram.pdf'
@@ -1162,14 +1024,19 @@ class DatasetAnalyzer:
             if self.event_stats['y_coords']:
                 y_coords = np.array(self.event_stats['y_coords'])
                 fig, ax = plt.subplots(1, 1, figsize=(self.fig_width, self.fig_height))
-                ax.hist(y_coords, bins=50, edgecolor='black', alpha=0.7, color='green')
+                counts, _, _ = ax.hist(y_coords, bins=50, edgecolor='black', alpha=0.7, color='green')
                 ax.set_xlabel(r'$y$ Coordinate (px)')
                 ax.set_ylabel('Event Count (log scale)')
                 ax.set_title(r'Event $y$ Coordinate Distribution')
                 ax.set_yscale('log')
+
+                ymax = float(np.max(counts)) if counts.size > 0 else 1.0
+                ylim_top = max(10.0, 10.0 ** np.ceil(np.log10(max(1.0, ymax))))
+                ax.set_ylim(ylim_top/100, ylim_top)
+
                 ax.grid(False)
-                p50 = np.percentile(y_coords, 50)
-                ax.axvline(p50, color='red', linestyle='-', linewidth=2, label=f"Median: {p50:.0f}")
+                mean_y = float(np.mean(y_coords)) if len(y_coords) > 0 else 0.0
+                ax.axvline(mean_y, color='red', linestyle='-', linewidth=2, label=f"Mean: {mean_y:.0f}")
                 ax.legend()
                 plt.tight_layout()
                 y_coord_path = output_dir / 'event_y_coordinate_histogram.pdf'
@@ -1187,9 +1054,9 @@ class DatasetAnalyzer:
             ax.set_yscale('log')
             ax.set_title('Event Rate Distribution per Animation Sample')
             ax.grid(False)
-            median_rate = np.median(rates)
-            ax.axvline(median_rate, color='red', linestyle='-', linewidth=1.5,
-                       label=f'Median: {median_rate:.2f}')
+            mean_rate = np.mean(rates) if len(rates) > 0 else 0.0
+            ax.axvline(mean_rate, color='red', linestyle='-', linewidth=1.5,
+                       label=f'Mean: {mean_rate:.2f}')
             ax.legend()
 
             rate_path = output_dir / 'event_rate_per_second.pdf'

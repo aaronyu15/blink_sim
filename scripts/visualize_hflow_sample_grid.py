@@ -5,6 +5,7 @@ from pathlib import Path
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.widgets import Slider
 
 # Add repo root so src imports resolve when running as a script.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +37,7 @@ def load_events(events_h5: Path):
 
 def load_flow(flow_h5: Path):
     with h5py.File(flow_h5, "r") as f:
-        flow = f["flow"][:]
+        flow = f["flow/forward"][:]
     return flow
 
 
@@ -154,8 +155,8 @@ def main():
 
     sample_dir = Path(args.sample_dir)
     rgb_dir = sample_dir / "rgb_reference"
-    events_h5 = sample_dir / "events_left" / "events.h5"
-    flow_h5 = sample_dir / "forward_flow" / "flow_gt.h5"
+    events_h5 = sample_dir / "events.h5"
+    flow_h5 = sample_dir / "flow.h5"
 
     if not rgb_dir.exists():
         raise FileNotFoundError(f"Missing directory: {rgb_dir}")
@@ -196,23 +197,52 @@ def main():
     t_start = float(t[0])
 
     fig, axes = plt.subplots(1, 3, figsize=(6, 4), squeeze=False)
+    plt.subplots_adjust(left=0.0, right=1.0, top=0.95, bottom=0.12, wspace=0.0, hspace=0.0)
 
-    rgb = normalize_rgb(plt.imread(rgb_files[idx]))
+    def draw(frame_idx):
+        frame_idx = int(frame_idx)
+        for c in range(3):
+            axes[0, c].clear()
+        
+        rgb = normalize_rgb(plt.imread(rgb_files[frame_idx+3]))
 
-    t0 = t_start + idx * dt_us
-    t1 = t_start + (idx + 0.5) * dt_us
-    event_rgb = events_to_rgb(t, x, y, p, t0, t1, height, width)
+        t0 = t_start + frame_idx * dt_us
+        t1 = t_start + (frame_idx + 0.5) * dt_us
+        event_rgb = events_to_rgb(t, x, y, p, t0, t1, height, width)
 
-    flow_rgb = flow_to_rgb(flow[idx], mask_invalid=args.mask_invalid)
+        flow_rgb = flow_to_rgb(flow[frame_idx], mask_invalid=args.mask_invalid)
 
-    axes[0, 0].imshow(rgb)
-    axes[0, 1].imshow(event_rgb)
-    axes[0, 2].imshow(flow_rgb)
+        axes[0, 0].imshow(rgb)
+        axes[0, 1].imshow(event_rgb)
+        axes[0, 2].imshow(flow_rgb)
 
-    for c in range(3):
-        axes[0, c].axis("off")
+        for c in range(3):
+            axes[0, c].axis("off")
+        
+        fig.suptitle(f"Frame {frame_idx}/{max_usable - 1}", fontsize=10)
 
-    plt.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0, wspace=0.0, hspace=0.0)
+    draw(idx)
+
+    # Add slider for frame navigation
+    ax_slider = plt.axes([0.15, 0.02, 0.70, 0.04])
+    slider = Slider(ax_slider, "Frame", 0, max_usable - 1, valinit=idx, valstep=1)
+
+    def on_slider_change(val):
+        draw(slider.val)
+        fig.canvas.draw_idle()
+
+    def on_key(event):
+        if event.key == "left":
+            slider.set_val(max(0, int(slider.val) - 1))
+        elif event.key == "right":
+            slider.set_val(min(max_usable - 1, int(slider.val) + 1))
+        elif event.key == "home":
+            slider.set_val(0)
+        elif event.key == "end":
+            slider.set_val(max_usable - 1)
+
+    slider.on_changed(on_slider_change)
+    fig.canvas.mpl_connect("key_press_event", on_key)
 
     if args.save is not None:
         out_path = Path(args.save)

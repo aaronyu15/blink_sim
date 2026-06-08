@@ -18,6 +18,14 @@ from pathlib import Path
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
+
+# Add repo root so src imports resolve when running as a script.
+import sys
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+from src.flow_viz import flow_to_image
 
 
 # Paper style configuration
@@ -69,6 +77,20 @@ def build_event_image(x: np.ndarray, y: np.ndarray, p: np.ndarray, h: int, w: in
     return rgb
 
 
+def build_rgb_image(rgb_path: Path) -> np.ndarray:
+    """Load and normalize an RGB image."""
+    img = Image.open(rgb_path).convert("RGB")
+    rgb = np.array(img, dtype=np.float32) / 255.0
+    return rgb
+
+
+def build_flow_image(flow: np.ndarray) -> np.ndarray:
+    """Convert optical flow to RGB using Middlebury color scheme."""
+    uv = flow[:, :, :2]
+    flow_rgb = flow_to_image(uv).astype(np.float32) / 255.0
+    return flow_rgb
+
+
 def choose_consecutive_frame_indices(num_frames: int, start_frame: int, n_show: int) -> np.ndarray:
     if num_frames <= 0:
         return np.array([], dtype=np.int32)
@@ -93,6 +115,10 @@ def create_visualization_figure(
     surface_stride: int,
     sample_name: str,
     num_flow_frames: int,
+    mode: str = "events",
+    rgb_dir: Path | None = None,
+    flow_data: np.ndarray | None = None,
+    rasterize_artists: bool = False,
 ) -> plt.Figure:
     n_events = t_vis.size
     if n_events > max_points:
@@ -111,8 +137,19 @@ def create_visualization_figure(
     fig = plt.figure(figsize=(fig_width, fig_height))
     ax = fig.add_subplot(111, projection="3d")
 
-    colors = np.where(ps > 0, "#d62728", "#1f77b4")
-    ax.scatter(ts, xs, ys, c=colors, s=DEFAULT_DOT_SIZE, alpha=0.4, linewidths=0)
+    # Only show event scatter for event mode
+    if mode == "events":
+        colors = np.where(ps > 0, "#d62728", "#1f77b4")
+        ax.scatter(
+            ts,
+            xs,
+            ys,
+            c=colors,
+            s=DEFAULT_DOT_SIZE,
+            alpha=0.4,
+            linewidths=0,
+            rasterized=rasterize_artists,
+        )
 
     stride = max(1, int(surface_stride))
 
@@ -120,23 +157,38 @@ def create_visualization_figure(
         ta = edges_us[fi]
         tb = edges_us[fi + 1]
 
-        start = np.searchsorted(t_vis, ta, side="left")
-        end = np.searchsorted(t_vis, tb, side="left")
-
-        x_slice = x_vis[start:end]
-        y_slice = y_vis[start:end]
-        p_slice = p_vis[start:end]
-
-        frame_rgb = build_event_image(x_slice, y_slice, p_slice, h=h, w=w)
-        frame_rgb_ds = frame_rgb[::stride, ::stride, :]
-
         time_plane_val = ((ta - z_ref_start) * 1e-6) * DEFAULT_TIME_STRETCH
         y_coords = np.arange(0, w, stride)
         z_coords = np.arange(0, h, stride)
         Y_plane, Z_plane = np.meshgrid(y_coords, z_coords)
         X_plane = np.full_like(Y_plane, time_plane_val, dtype=np.float64)
 
-        ax.plot_surface(
+        if mode == "events":
+            start = np.searchsorted(t_vis, ta, side="left")
+            end = np.searchsorted(t_vis, tb, side="left")
+            x_slice = x_vis[start:end]
+            y_slice = y_vis[start:end]
+            p_slice = p_vis[start:end]
+            frame_rgb = build_event_image(x_slice, y_slice, p_slice, h=h, w=w)
+        elif mode == "rgb":
+            # Load RGB frame by index
+            rgb_files = sorted(rgb_dir.glob("*.png")) if rgb_dir else []
+            if fi < len(rgb_files):
+                frame_rgb = build_rgb_image(rgb_files[fi])
+            else:
+                frame_rgb = np.zeros((h, w, 3), dtype=np.float32)
+        elif mode == "flow":
+            # Use flow data directly
+            if fi < flow_data.shape[0]:
+                frame_rgb = build_flow_image(flow_data[fi])
+            else:
+                frame_rgb = np.zeros((h, w, 3), dtype=np.float32)
+        else:
+            frame_rgb = np.zeros((h, w, 3), dtype=np.float32)
+
+        frame_rgb_ds = frame_rgb[::stride, ::stride, :]
+
+        surf = ax.plot_surface(
             X_plane,
             Y_plane,
             Z_plane,
@@ -148,6 +200,7 @@ def create_visualization_figure(
             antialiased=False,
             alpha=0.95,
         )
+        surf.set_rasterized(rasterize_artists)
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("")
@@ -155,6 +208,7 @@ def create_visualization_figure(
     ax.set_title("")
     ax.set_yticks([])
     ax.set_zticks([])
+    ax.set_xticks([])
 
     ax.grid(False)
     for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
@@ -162,12 +216,39 @@ def create_visualization_figure(
             axis.pane.fill = False
         except Exception:
             pass
+    
+    # Hide Y and Z axes completely
+    ax.yaxis.set_visible(False)
+    ax.zaxis.set_visible(False)
 
     ax.set_xlim(0, (z_ref_duration_us * 1e-6) * DEFAULT_TIME_STRETCH)
     ax.set_ylim(0, w - 1)
     ax.set_zlim(h - 1, 0)
     ax.set_box_aspect(DEFAULT_BOX_ASPECT)
-    ax.view_init(elev=18, azim=-90)
+    elev = 20
+    azim = -65
+    ax.view_init(elev=elev, azim=azim)
+    
+    # Add camera position text annotation with dynamic update
+    camera_text = fig.text(
+        0.02, 0.98,
+        f"Camera: elev={elev}°, azim={azim}°",
+        fontsize=9,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5)
+    )
+    
+    # Callback to update camera position text when view changes
+    def update_camera_text(event):
+        try:
+            elev_current = ax.elev
+            azim_current = ax.azim
+            camera_text.set_text(f"Camera: elev={elev_current:.0f}°, azim={azim_current:.0f}°")
+        except Exception:
+            pass
+    
+    fig.canvas.mpl_connect("motion_notify_event", update_camera_text)
+    
     fig.tight_layout(pad=0.02)
     return fig
 
@@ -181,6 +262,13 @@ def main() -> None:
         help="Path to one sample directory, e.g. outputs/hflow320/train/girl1_RunningToTurn_1",
     )
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["events", "rgb", "flow"],
+        default="events",
+        help="Which frame type to visualize: events, rgb, or flow",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="./output/visualizations/event_frame_construction_3d.pdf",
@@ -189,7 +277,7 @@ def main() -> None:
     parser.add_argument(
         "--frames-to-show",
         type=int,
-        default=4,
+        default=7,
         help="How many consecutive flow-frame intervals to visualize as event-frame slices",
     )
     parser.add_argument(
@@ -203,31 +291,52 @@ def main() -> None:
         action="store_true",
         help="Skip interactive preview window before saving",
     )
+    parser.add_argument(
+        "--rasterize-pdf",
+        dest="rasterize_pdf",
+        action="store_true",
+        help="Rasterize 3D frame planes/scatter when saving PDF so frames are embedded as images",
+    )
+    parser.add_argument(
+        "--no-rasterize-pdf",
+        dest="rasterize_pdf",
+        action="store_false",
+        help="Keep fully vector PDF output",
+    )
+    parser.set_defaults(rasterize_pdf=True)
     args = parser.parse_args()
 
     sample_dir = Path(args.sample_dir)
-    event_h5 = sample_dir / "events_left" / "events.h5"
-    flow_h5 = sample_dir / "forward_flow" / "flow_gt.h5"
+    event_h5 = sample_dir  / "events.h5"
+    flow_h5 = sample_dir  / "flow.h5"
+    rgb_dir = sample_dir / "rgb_reference"
 
     if not event_h5.exists():
         raise FileNotFoundError(f"Missing event file: {event_h5}")
     if not flow_h5.exists():
         raise FileNotFoundError(f"Missing flow file: {flow_h5}")
+    if args.mode == "rgb" and not rgb_dir.exists():
+        raise FileNotFoundError(f"Missing RGB directory: {rgb_dir}")
 
     with h5py.File(event_h5, "r") as ef, h5py.File(flow_h5, "r") as ff:
         for key in ["events/x", "events/y", "events/t", "events/p"]:
             if key not in ef:
                 raise KeyError(f"Expected key '{key}' in {event_h5}")
-        if "flow" not in ff:
-            raise KeyError(f"Expected key 'flow' in {flow_h5}")
+        if "flow/forward" not in ff:
+            raise KeyError(f"Expected key 'flow/forward' in {flow_h5}")
 
         x = ef["events/x"][:]
         y = ef["events/y"][:]
         t = ef["events/t"][:].astype(np.float64)
         p = ef["events/p"][:]
-        num_flow_frames = int(ff["flow"].shape[0])
-        h = int(ff["flow"].shape[1])
-        w = int(ff["flow"].shape[2])
+        num_flow_frames = int(ff["flow/forward"].shape[0])
+        h = int(ff["flow/forward"].shape[1])
+        w = int(ff["flow/forward"].shape[2])
+        
+        # Load flow data if needed
+        flow_data = None
+        if args.mode == "flow":
+            flow_data = ff["flow/forward"][:]
 
     if t.size == 0:
         raise ValueError("No events found in sample.")
@@ -258,6 +367,7 @@ def main() -> None:
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
+    rasterize_for_output = args.rasterize_pdf and out.suffix.lower() == ".pdf"
 
     # Show interactive preview before writing to disk unless explicitly skipped.
     if not args.no_preview:
@@ -276,6 +386,10 @@ def main() -> None:
             DEFAULT_PREVIEW_SURFACE_STRIDE,
             sample_dir.name,
             num_flow_frames,
+            mode=args.mode,
+            rgb_dir=rgb_dir if args.mode == "rgb" else None,
+            flow_data=flow_data,
+            rasterize_artists=False,
         )
         plt.show()
         plt.close(preview_fig)
@@ -295,12 +409,17 @@ def main() -> None:
         DEFAULT_SAVE_SURFACE_STRIDE,
         sample_dir.name,
         num_flow_frames,
+        mode=args.mode,
+        rgb_dir=rgb_dir if args.mode == "rgb" else None,
+        flow_data=flow_data,
+        rasterize_artists=rasterize_for_output,
     )
     fig.savefig(out, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
     print(f"Saved: {out}")
     print(f"Sample: {sample_dir.name}")
+    print(f"Mode: {args.mode}")
     print(f"Events shown in selected window: {t_vis.size:,}, Flow frames in sequence: {num_flow_frames}")
     print(f"Defaults: dot_size={DEFAULT_DOT_SIZE}, time_stretch={DEFAULT_TIME_STRETCH}, save_max_points={DEFAULT_SAVE_MAX_POINTS}")
 

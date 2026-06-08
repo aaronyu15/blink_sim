@@ -84,7 +84,10 @@ def accumulate_masked_flow_stats(
         if not all(key in event_f for key in ("events/x", "events/y", "events/t")):
             return mag_sum, mag_sq_sum, mag_count, processed_frames
 
-        flow_ds = flow_f["flow"]
+        flow_ds = flow_f["flow/forward"]
+        valid_ds = flow_f["flow/valid"]
+        event_start = flow_f["flow/event_start"]
+        event_end = flow_f["flow/event_end"]
         x = event_f["events/x"][:]
         y = event_f["events/y"][:]
         t = event_f["events/t"][:]
@@ -93,27 +96,21 @@ def accumulate_masked_flow_stats(
             return mag_sum, mag_sq_sum, mag_count, processed_frames
 
         num_frames = int(flow_ds.shape[0])
-        t_start_us = float(t[0])
-        total_duration_us = float(t[-1] - t[0])
-        frame_interval_us = total_duration_us / max(1, num_frames)
-        if frame_fps > 0:
-            frame_interval_us = min(frame_interval_us, 1e6 / frame_fps)
 
         for frame_idx in range(num_frames):
             flow_frame = flow_ds[frame_idx]
+            valid_mask = valid_ds[frame_idx]
             if flow_frame.ndim != 3 or flow_frame.shape[2] not in (2, 3):
                 continue
 
             flow_u = flow_frame[:, :, 0]
             flow_v = flow_frame[:, :, 1]
             h, w = flow_u.shape
-            if flow_frame.shape[2] == 3:
-                valid_mask = flow_frame[:, :, 2] > 0.5
-            else:
-                valid_mask = np.ones((h, w), dtype=bool)
 
-            t1 = t_start_us + (frame_idx + 1) * frame_interval_us
-            t0 = max(t_start_us, t1 - event_window_us)
+            valid_mask = valid_mask[:, :, 0] > 0.5
+
+            t1 = event_end[frame_idx]
+            t0 = event_start[frame_idx]
             start_idx = np.searchsorted(t, t0, side="left")
             end_idx = np.searchsorted(t, t1, side="left")
 
@@ -128,7 +125,8 @@ def accumulate_masked_flow_stats(
                 continue
 
             event_mask[y_slice[valid_coords].astype(int), x_slice[valid_coords].astype(int)] = True
-            combined_mask = valid_mask & event_mask
+            magnitude_mask = np.sqrt(flow_u**2 + flow_v**2) > 0.01
+            combined_mask = valid_mask & event_mask & magnitude_mask
             if not np.any(combined_mask):
                 continue
 
@@ -161,8 +159,8 @@ def main() -> None:
     per_frame_masked_means = []
 
     for sample_dir in tqdm(sample_dirs, desc="Processing samples"):
-        flow_h5 = sample_dir / "forward_flow" / "flow_gt.h5"
-        event_h5 = sample_dir / "events_left" / "events.h5"
+        flow_h5 = sample_dir / "flow.h5"
+        event_h5 = sample_dir / "events.h5"
 
         if not event_h5.exists():
             continue
