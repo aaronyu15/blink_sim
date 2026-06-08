@@ -64,17 +64,41 @@ def animation(output_dir, setup_info, config):
     bpy.context.scene.frame_end = num_frames
 
     if mode in ['linear', 'cubinc_spline']:
-        key_frames = np.linspace(0, num_frames-1, num_kf).astype(np.int32).tolist()
+        # Build strictly increasing integer keyframes for interpolation/Slerp.
+        # Integer rounding from linspace can create duplicate times when num_kf is high.
+        if num_frames <= 1:
+            key_frames = [0]
+        else:
+            num_kf = max(2, min(int(num_kf), int(num_frames)))
+            key_frames = np.linspace(0, num_frames - 1, num_kf).round().astype(np.int32).tolist()
+            key_frames = np.unique(np.asarray(key_frames, dtype=np.int32)).tolist()
+            if len(key_frames) < 2:
+                key_frames = [0, int(num_frames) - 1]
+
         cam_pose_list = setup_info['cam_pose']
         obj_pose_list = setup_info['dyna_objs_pose']
         obj_list = setup_info['dynamic_objs']
+
+        # Keep pose arrays aligned with the effective keyframe count.
+        target_len = len(key_frames)
+        if target_len == 1:
+            target_len = 2
+
         for obj_idx, _ in enumerate(obj_pose_list):
             obj_pos = [pos for (pos, euler) in obj_pose_list[obj_idx]]
             obj_euler = [euler for (pos, euler) in obj_pose_list[obj_idx]]
+            if len(obj_pos) != target_len:
+                idx = np.linspace(0, max(0, len(obj_pos) - 1), target_len).round().astype(np.int32)
+                obj_pos = [obj_pos[i] for i in idx]
+                obj_euler = [obj_euler[i] for i in idx]
             obj = obj_list[obj_idx]
             move_one_obj(obj.blender_obj, key_frames, obj_pos, obj_euler, mode=mode)
         cam_pos = [pos for (pos, euler) in cam_pose_list]
         cam_euler = [euler for (pos, euler) in cam_pose_list]
+        if len(cam_pos) != target_len:
+            idx = np.linspace(0, max(0, len(cam_pos) - 1), target_len).round().astype(np.int32)
+            cam_pos = [cam_pos[i] for i in idx]
+            cam_euler = [cam_euler[i] for i in idx]
         move_one_obj(bpy.context.scene.camera, key_frames, cam_pos, cam_euler, mode=mode)
     else:
         print('warning: we have deleted other modes')

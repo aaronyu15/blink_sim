@@ -325,76 +325,290 @@ def flow_consistency(forward, backward, device="cpu"):
 
 
 
-def parse_hdf5_to_flow_dataset(output_dir, nFrames, width, height, save_hdr=True, rgb_fps=30, event_fps=300, trim_initial_frames=0):
+def _find_event_h5_path(output_dir, event_h5_path=None):
+    """
+    Try to find the event HDF5 file produced for this sequence.
+
+    If found, frame_event_start/frame_event_end can be written as indices into
+    the actual event arrays instead of just high-FPS frame numbers.
+    """
+    if event_h5_path is not None:
+        return event_h5_path if os.path.exists(event_h5_path) else None
+
+    candidates = [
+        f"{output_dir}/events.h5",
+        f"{output_dir}/events.hdf5",
+        f"{output_dir}/event.h5",
+        f"{output_dir}/event.hdf5",
+        f"{output_dir}/dvs_events.h5",
+        f"{output_dir}/dvs_events.hdf5",
+        f"{output_dir}/dvs_events/events.h5",
+        f"{output_dir}/dvs_events/events.hdf5",
+        f"{output_dir}/dvs_events/event.h5",
+        f"{output_dir}/dvs_events/event.hdf5",
+    ]
+
+    for pattern in [
+        f"{output_dir}/dvs_events/*.h5",
+        f"{output_dir}/dvs_events/*.hdf5",
+        f"{output_dir}/events/*.h5",
+        f"{output_dir}/events/*.hdf5",
+    ]:
+        candidates.extend(sorted(glob.glob(pattern)))
+
+    for p in candidates:
+        if os.path.exists(p) and os.path.basename(p) != "flow.h5":
+            return p
+    return None
+
+
+def _read_event_timestamps_from_h5(event_h5_path):
+    """
+    Return the event timestamp vector from an event HDF5 file.
+
+    Supports common layouts such as:
+      /t, /ts, /timestamp, /timestamps
+      /events/t, /events/ts, /events/timestamp, /events/timestamps
+      a compound /events dataset with a t/ts/timestamp field
+    """
+    preferred_paths = [
+        "events/t", "events/ts", "events/time", "events/timestamp", "events/timestamps",
+        "event/t", "event/ts", "event/time", "event/timestamp", "event/timestamps",
+        "t", "ts", "time", "timestamp", "timestamps",
+    ]
+
+    with h5py.File(event_h5_path, "r") as hf:
+        for key in preferred_paths:
+            if key in hf:
+                arr = np.asarray(hf[key])
+                if arr.ndim == 1 and np.issubdtype(arr.dtype, np.number):
+                    return arr
+
+        found = []
+
+        def visitor(name, obj):
+            if not isinstance(obj, h5py.Dataset):
+                return
+            base = name.split("/")[-1].lower()
+            if base in {"t", "ts", "time", "timestamp", "timestamps"}:
+                arr = np.asarray(obj)
+                if arr.ndim == 1 and np.issubdtype(arr.dtype, np.number):
+                    found.append(arr)
+                    return
+
+            # Compound dataset case, for example /events with fields x,y,t,p.
+            if obj.dtype.names:
+                lower_fields = {field.lower(): field for field in obj.dtype.names}
+                for alias in ("t", "ts", "time", "timestamp", "timestamps"):
+                    if alias in lower_fields:
+                        arr = np.asarray(obj[lower_fields[alias]])
+                        if arr.ndim == 1 and np.issubdtype(arr.dtype, np.number):
+                            found.append(arr)
+                            return
+
+        hf.visititems(visitor)
+
+    if not found:
+        return None
+    return found[0]
+
+
+def _event_timestamp_scale_to_us(event_t, expected_duration_s):
+    """
+    Infer how to convert event-file timestamps to microseconds.
+
+    The returned value is the multiplier such that:
+        timestamp_us = event_t * scale_to_us
+
+    Float event timestamps are usually seconds. Integer event timestamps are
+    commonly microseconds, but this also handles millisecond/nanosecond-looking
+    magnitudes.
+    """
+    if event_t is None or len(event_t) == 0:
+        return None
+
+    arr = np.asarray(event_t)
+    finite = arr[np.isfinite(arr)] if np.issubdtype(arr.dtype, np.floating) else arr
+    if finite.size == 0:
+        return None
+
+    t0 = float(finite[0])
+    t1 = float(finite[-1])
+    span = max(0.0, t1 - t0)
+    expected_duration_s = max(float(expected_duration_s), 1e-9)
+
+    if np.issubdtype(arr.dtype, np.floating):
+        # Most DVS/event simulators store floating timestamps in seconds.
+        return 1e6
+
+    # Integer timestamps: infer from the approximate sequence duration.
+    # Use loose thresholds because events may start after 0 or end before the last frame.
+    if span <= expected_duration_s * 20.0:
+        return 1e6       # seconds stored as integer, rare but harmless
+    if span <= expected_duration_s * 20.0 * 1e3:
+        return 1e3       # milliseconds
+    if span <= expected_duration_s * 20.0 * 1e6:
+        return 1.0       # microseconds
+    return 1e-3          # nanoseconds
+
+
+def _event_indices_from_timestamps(event_t, event_start_us, event_end_us, expected_duration_s):
+    """
+    Convert flow interval timestamps in microseconds to [start,end) event indices.
+    Returns None if the event timestamp vector cannot be used safely.
+    """
+    if event_t is None or len(event_t) == 0:
+        return None
+
+    event_t = np.asarray(event_t)
+    if event_t.ndim != 1 or not np.issubdtype(event_t.dtype, np.number):
+        return None
+    if len(event_t) > 1 and np.any(np.diff(event_t) < 0):
+        print("[flow.h5] Warning: event timestamps are not sorted; falling back to event-frame indices.")
+        return None
+
+    scale_to_us = _event_timestamp_scale_to_us(event_t, expected_duration_s)
+    if scale_to_us is None:
+        return None
+
+    # Convert stored event timestamps into microseconds, then search with the
+    # absolute flow interval timestamps. This keeps flow.h5 independent of any
+    # trim/offset metadata.
+    event_t_us = event_t.astype(np.float64) * float(scale_to_us)
+    start_idx = np.searchsorted(event_t_us, event_start_us.astype(np.float64), side="left")
+    end_idx = np.searchsorted(event_t_us, event_end_us.astype(np.float64), side="left")
+
+    return start_idx.astype(np.uint64), end_idx.astype(np.uint64), scale_to_us
+
+def parse_hdf5_to_flow_dataset(
+        output_dir, nFrames, width, height, save_hdr=True,
+        rgb_fps=30, event_fps=300, trim_initial_frames=0,
+        event_h5_path=None):
+    """
+    Export a flow.h5 file whose metadata is directly aligned to the event stream.
+
+    The generated flow.h5 contains root-level datasets:
+
+      forward_flow          [N,H,W,2] float32
+      valid                 [N,H,W,1] float32
+      frame_event_start     [N] uint64
+      frame_event_end       [N] uint64
+      event_start           [N] uint64, absolute timestamp in microseconds
+      event_end             [N] uint64, absolute timestamp in microseconds
+
+    For flow sample k exported from original RGB frame i, the interval is:
+        [i / rgb_fps, (i + 1) / rgb_fps)
+
+    This means trim_initial_frames is already baked into event_start/event_end
+    and frame_event_start/frame_event_end. No separate offset field is required.
+    """
     num = len(glob.glob(f"{output_dir}/hdf5/rgb_and_flow/*.hdf5"))
     assert nFrames <= num
-    # os.system(f'mkdir -p {output_dir}/left_final')
+
     if save_hdr:
         os.system(f'mkdir -p {output_dir}/hdr')
     os.system(f'mkdir -p {output_dir}/forward_flow')
 
-    # After trimming, we have nFrames - trim_initial_frames frames to export
-    # Flow requires consecutive frames, so flow_count = exported_frame_count - 1
-    exported_frames = max(1, nFrames - trim_initial_frames)
+    exported_frames = max(1, int(nFrames) - int(trim_initial_frames))
     flow_count = max(0, exported_frames - 1)
+
     flow_forward = np.zeros((flow_count, height, width, 2), dtype=np.float32)
-    flow_backward = np.zeros((flow_count, height, width, 2), dtype=np.float32)
     flow_valid = np.zeros((flow_count, height, width, 1), dtype=np.float32)
-    frame_t_us = np.zeros((flow_count,), dtype=np.uint64)
+
+    # Absolute timestamps in the event-stream timebase, expressed in microseconds.
+    # These already include trim_initial_frames, so the first exported flow sample
+    # does NOT start at zero unless trim_initial_frames == 0.
+    event_start = np.zeros((flow_count,), dtype=np.uint64)
+    event_end = np.zeros((flow_count,), dtype=np.uint64)
+
+    # These will become true event-array indices if an event HDF5 timestamp array
+    # is available. Otherwise, they fall back to absolute high-FPS event-frame
+    # indices, which are still offset-free with respect to trim_initial_frames.
     frame_event_start = np.zeros((flow_count,), dtype=np.uint64)
     frame_event_end = np.zeros((flow_count,), dtype=np.uint64)
-    # Absolute event timeline offset caused by trimming initial RGB frames.
-    trim_initial_event_frames = int(round(trim_initial_frames * float(event_fps) / float(rgb_fps)))
-    event_t_offset_us = int(round((trim_initial_event_frames / float(event_fps)) * 1e6))
 
-    for i in range(nFrames):
-        # Skip first trim_initial_frames frames
-        if i < trim_initial_frames:
-            continue
-        
-        export_idx = i - trim_initial_frames  # Index in exported output
+    for i in range(int(trim_initial_frames), int(nFrames) - 1):
+        export_idx = i - int(trim_initial_frames)
+
         hdf5_path = f"{output_dir}/hdf5/rgb_and_flow/{i}.hdf5"
-        data = h5py.File(hdf5_path, 'r')
-        forward = data['forward_flow'][:] # (h, w, 2)
+        hdf5_path_next = f"{output_dir}/hdf5/rgb_and_flow/{i + 1}.hdf5"
 
-        if save_hdr:
-            hdr = data['blur'][:]
-            np.save(f'{output_dir}/hdr/{i:06d}.npy', hdr)
-        # blur = data['blur'][:] * 255
-        # cv2.imwrite(f'{output_dir}/left_final/{i:06d}.png', blur)
+        with h5py.File(hdf5_path, 'r') as data:
+            forward = data['forward_flow'][:].astype(np.float32)
 
-        if i != nFrames-1:
-            hdf5_path_next = f"{output_dir}/hdf5/rgb_and_flow/{i+1}.hdf5"
-            data_next = h5py.File(hdf5_path_next, 'r')
-            backward = data_next['backward_flow'][:] # (h, w, 2)
-            valid = flow_consistency(forward, backward)
+            if save_hdr:
+                hdr = data['blur'][:]
+                np.save(f'{output_dir}/hdr/{i:06d}.npy', hdr)
 
-            flow_image = np.concatenate([forward, valid], axis=2)
-            np.save(f'{output_dir}/forward_flow/{export_idx:06d}.npy', flow_image)
+        with h5py.File(hdf5_path_next, 'r') as data_next:
+            backward = data_next['backward_flow'][:].astype(np.float32)
 
-            flow_forward[export_idx] = forward.astype(np.float32)
-            flow_backward[export_idx] = backward.astype(np.float32)
-            flow_valid[export_idx] = valid.astype(np.float32)
+        valid = flow_consistency(forward, backward)
 
-            # Timestamp/interval metadata aligned to the exported frame timeline (after trimming).
-            frame_t_us[export_idx] = int(round((export_idx / float(rgb_fps)) * 1e6))
-            frame_event_start[export_idx] = int(round(export_idx * float(event_fps) / float(rgb_fps)))
-            frame_event_end[export_idx] = int(round((export_idx + 1) * float(event_fps) / float(rgb_fps)))
+        # Keep the old per-frame .npy side output for compatibility with any
+        # existing visualization/debug code, but the final dataset is flow.h5.
+        flow_image = np.concatenate([forward, valid], axis=2)
+        np.save(f'{output_dir}/forward_flow/{export_idx:06d}.npy', flow_image)
+
+        flow_forward[export_idx] = forward
+        flow_valid[export_idx] = valid.astype(np.float32)
+
+        # Absolute, untrimmed timeline. No later offset correction needed.
+        event_start[export_idx] = int(round((i / float(rgb_fps)) * 1e6))
+        event_end[export_idx] = int(round(((i + 1) / float(rgb_fps)) * 1e6))
+
+        # Offset-free event-input frame indices. These are overwritten below with
+        # actual event-array indices if an event HDF5 timestamp vector is found.
+        frame_event_start[export_idx] = int(round(i * float(event_fps) / float(rgb_fps)))
+        frame_event_end[export_idx] = int(round((i + 1) * float(event_fps) / float(rgb_fps)))
+
+    # If the event HDF5 file already exists, make frame_event_start/end true
+    # indices into the event arrays by searching the event timestamp vector.
+    found_event_h5 = _find_event_h5_path(output_dir, event_h5_path=event_h5_path)
+    event_timestamp_scale_to_us = None
+    if found_event_h5 is not None and flow_count > 0:
+        event_t = _read_event_timestamps_from_h5(found_event_h5)
+        expected_duration_s = float(nFrames) / float(rgb_fps)
+        idx_info = _event_indices_from_timestamps(
+            event_t, event_start, event_end, expected_duration_s
+        )
+        if idx_info is not None:
+            frame_event_start, frame_event_end, event_timestamp_scale_to_us = idx_info
+            print(f"[flow.h5] Using event indices from: {found_event_h5}")
+        else:
+            print("[flow.h5] Warning: could not read usable event timestamps; "
+                  "frame_event_start/end are high-FPS event-frame indices.")
+    elif flow_count > 0:
+        print("[flow.h5] Warning: event HDF5 file not found yet; "
+              "frame_event_start/end are high-FPS event-frame indices.")
 
     with h5py.File(f'{output_dir}/flow.h5', 'w') as hf:
         hf.create_dataset('flow/forward', data=flow_forward, compression='gzip', compression_opts=4)
-        hf.create_dataset('flow/backward', data=flow_backward, compression='gzip', compression_opts=4)
         hf.create_dataset('flow/valid', data=flow_valid, compression='gzip', compression_opts=4)
-        hf.create_dataset('flow/frame_t_us', data=frame_t_us, compression='gzip', compression_opts=4)
         hf.create_dataset('flow/frame_event_start', data=frame_event_start, compression='gzip', compression_opts=4)
         hf.create_dataset('flow/frame_event_end', data=frame_event_end, compression='gzip', compression_opts=4)
-        hf.create_dataset('flow/event_t_offset_us', data=np.array(event_t_offset_us, dtype=np.uint64))
-        hf.create_dataset('flow/event_frame_offset', data=np.array(trim_initial_event_frames, dtype=np.uint64))
+        hf.create_dataset('flow/event_start', data=event_start, compression='gzip', compression_opts=4)
+        hf.create_dataset('flow/event_end', data=event_end, compression='gzip', compression_opts=4)
+
+        hf['flow/forward'].attrs['description'] = 'Forward optical flow from RGB frame i to i+1.'
+        hf['flow/valid'].attrs['description'] = 'Forward/backward consistency mask.'
+        hf['flow/frame_event_start'].attrs['description'] = (
+            'Start index into the event HDF5 event arrays when event timestamps were found; '
+            'otherwise absolute high-FPS event-frame index.'
+        )
+        hf['flow/frame_event_end'].attrs['description'] = (
+            'Exclusive end index into the event HDF5 event arrays when event timestamps were found; '
+            'otherwise absolute high-FPS event-frame index.'
+        )
+        hf['flow/event_start'].attrs['unit'] = 'microseconds'
+        hf['flow/event_end'].attrs['unit'] = 'microseconds'
+        hf.attrs['rgb_fps'] = float(rgb_fps)
+        hf.attrs['event_fps'] = float(event_fps)
+
 
     forward_flow_dir = f'{output_dir}/forward_flow'
     if os.path.isdir(forward_flow_dir):
         shutil.rmtree(forward_flow_dir)
-
 
 def cli():
     parser = argparse.ArgumentParser("Script to visualize hdf5 files")
@@ -454,3 +668,4 @@ def cli():
 
 if __name__ == "__main__":
     cli()
+ 
